@@ -31,31 +31,35 @@ def _generate_opinion_critique_prompt(
 ) -> str:
   """Generates a prompt using opinions, previous winner, and critiques."""
 
-  prompt = f"""You are assisting a citizens' jury in forming a consensus opinion on an important question. The jury members have provided their individual opinions, a first draft of a consensus statement was created, and critiques of that draft were gathered. Your role is to generate a revised consensus statement that incorporates the feedback and aims to better represent the collective view of the jury.  Ensure the revised statement does not conflict with the individual opinions.
+  prompt = f"""You are assisting a citizens' jury in forming a consensus opinion on an important question. The jury members have provided their individual opinions, a first draft of a consensus statement was created, and critiques of that draft were gathered. Your role is to generate a revised consensus statement that incorporates the feedback and aims to better represent the collective view of the jury. Ensure the revised statement does not conflict with the individual opinions.
 
 Please think through this task step-by-step:
 
 1. Carefully analyze the individual opinions, noting key themes, points of agreement, and areas of disagreement.
 2. Review the previous draft consensus statement and identify its strengths and weaknesses.
 3. Analyze the critiques of the previous draft, paying attention to specific suggestions and concerns raised by the jury members.
-4. Based on the opinions, the previous draft, and the critiques, synthesize a revised consensus statement that addresses the concerns raised and better reflects the collective view of the jury. Ensure the statement is clear, concise, addresses the core issue posed in the question, and *does not conflict* with any of the individual opinions.  Refer to specific opinion and critique numbers when making your revisions.
+4. Based on the opinions, the previous draft, and the critiques, synthesize a revised consensus statement that addresses the concerns raised and better reflects the collective view of the jury. Ensure the statement is clear, concise, addresses the core issue posed in the question, and *does not conflict* with any of the individual opinions. Refer to specific opinion and critique numbers when making your revisions.
 
 Provide your answer in the following format:
-<answer>
+
+## Reasoning:
 [Your step-by-step reasoning and explanation for the revised statement]
-<sep>
-[Revised consensus statement]
-</answer>
+
+## Revised Consensus Statement:
+[The revised consensus statement ONLY - clear and concise, without any preamble]
 
 Example:
-<answer>
+
+## Reasoning:
 1. Opinions generally agree on the need for more green spaces (Opinions 1, 2, 3), but disagree on the specific location (Opinions 2 and 3 prefer the riverfront) and funding (Opinion 1 suggests a tax levy, Opinion 3 suggests private donations).
 2. The previous draft suggested converting the old factory site into a park, but didn't address funding, which was a key concern in Critique 1.
 3. Critiques highlighted the lack of funding details (Critique 1) and some preferred a different location (Critique 2 suggested the riverfront, echoing Opinion 2).
 4. The revised statement proposes converting the old factory site into a park, funded by a combination of city funds and private donations (addressing Opinion 3 and Critique 1), and includes a plan for community input on park design and amenities. The factory site is chosen as a compromise location, as it avoids the higher costs associated with the riverfront development suggested in Opinion 2 and Critique 2.
-<sep>
+
+## Revised Consensus Statement:
 We propose converting the old factory site into a park, funded by a combination of city funds and private donations. We will actively seek community input on the park's design and amenities to ensure it meets the needs of our residents.
-</answer>
+
+It is CRITICAL to follow this format. Always include the "## Reasoning:" section followed by your explanation, then the "## Revised Consensus Statement:" section with ONLY the statement.
 
 
 Below you will find the question, the individual opinions, the previous draft consensus statement, and the critiques provided by the jury members.
@@ -85,28 +89,31 @@ def _generate_opinion_only_prompt(
     opinions: Sequence[str],
 ) -> str:
   """Generates a prompt for the LLM using only the opinions."""
-  prompt = f"""
-You are assisting a citizens' jury in forming an initial consensus opinion on an important question. The jury members have provided their individual opinions. Your role is to generate a draft consensus statement that captures the main points of agreement and represents the collective view of the jury.  The draft statement must not conflict with any of the individual opinions.
+  prompt = f"""You are assisting a citizens' jury in forming an initial consensus opinion on an important question. The jury members have provided their individual opinions. Your role is to generate a draft consensus statement that captures the main points of agreement and represents the collective view of the jury. The draft statement must not conflict with any of the individual opinions.
 
 Please think through this task step-by-step:
 
 1. Carefully analyze the individual opinions, noting key themes, points of agreement, and areas of disagreement.
-2. Based on the analysis, synthesize a concise and clear consensus statement that represents the shared perspective of the jury members.  Address the core issue posed in the question, and ensure the statement *does not conflict* with any of the individual opinions.  Refer to specific opinion numbers to demonstrate how the draft reflects the collective view.
+2. Based on the analysis, synthesize a concise and clear consensus statement that represents the shared perspective of the jury members. Address the core issue posed in the question, and ensure the statement *does not conflict* with any of the individual opinions. Refer to specific opinion numbers to demonstrate how the draft reflects the collective view.
 
 Provide your answer in the following format:
-<answer>
+
+## Reasoning:
 [Your step-by-step reasoning and explanation for the statement]
-<sep>
-[Draft consensus statement]
-</answer>
+
+## Draft Consensus Statement:
+[The draft consensus statement ONLY - clear and concise, without any preamble]
 
 Example:
-<answer>
+
+## Reasoning:
 1. Most opinions emphasize the importance of public transportation (Opinions 1, 3, 4) and reducing car dependency (Opinions 2, 4). Some also mention cycling and walking as important additions (Opinions 2, 3).
 2. The draft statement prioritizes investment in public transport and encourages cycling and walking, reflecting the shared views expressed in the majority of opinions.
-<sep>
+
+## Draft Consensus Statement:
 We believe that investing in public transport, along with promoting cycling and walking, are crucial steps towards creating a more sustainable and livable city.
-</answer>
+
+It is CRITICAL to follow this format. Always include the "## Reasoning:" section followed by your explanation, then the "## Draft Consensus Statement:" section with ONLY the statement.
 
 
 Below you will find the question and the individual opinions of the jury members.
@@ -147,6 +154,18 @@ def _process_model_response(response: str) -> tuple[str, str]:
       A tuple of (statement, explanation).  If the response format is
       incorrect, returns ("", "INCORRECT_TEMPLATE").
   """
+  # Try new markdown format first (either "Draft" or "Revised" Consensus Statement)
+  match = re.search(
+      r'##\s*Reasoning:\s*(.*?)##\s*(?:Draft|Revised)\s+Consensus Statement:\s*(.*?)(?:\n##|$)',
+      response,
+      re.DOTALL | re.IGNORECASE
+  )
+  if match:
+    explanation = match.group(1).strip()
+    statement = match.group(2).strip()
+    return statement, explanation
+
+  # Fall back to old XML-like format for backward compatibility
   match = re.search(
       r'<answer>\s*(.*?)\s*<sep>\s*(.*?)\s*</answer>', response, re.DOTALL
   )
@@ -154,8 +173,8 @@ def _process_model_response(response: str) -> tuple[str, str]:
     explanation = match.group(1).strip()
     statement = match.group(2).strip()
     return statement, explanation
-  else:
-    return '', 'INCORRECT_TEMPLATE'
+
+  return '', 'INCORRECT_TEMPLATE'
 
 
 class COTModel(base_model.BaseStatementModel):
@@ -182,7 +201,7 @@ class COTModel(base_model.BaseStatementModel):
     statement, explanation = '', ''  # Dummy result.
     for _ in range(num_retries_on_error):
       response = llm_client.sample_text(
-          prompt, terminators=['</answer>'], seed=seed)
+          prompt, terminators=[], seed=seed)
 
       statement, explanation = _process_model_response(response)
       if len(statement) > 5 and 'INCORRECT' not in explanation:
