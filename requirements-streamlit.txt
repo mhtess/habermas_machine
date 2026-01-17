@@ -1,0 +1,4 @@
+# Additional requirements for running the classroom Streamlit app
+# Install with: pip install -r requirements-streamlit.txt
+
+streamlit>=1.28.0
