@@ -10,9 +10,91 @@ Usage:
     streamlit run classroom_app.py
 """
 
+import re
 import streamlit as st
 from habermas_machine import machine, types
 from habermas_machine.social_choice import utils as sc_utils
+
+# Optional Google Sheets integration
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+    SHEETS_AVAILABLE = True
+except ImportError:
+    SHEETS_AVAILABLE = False
+
+
+def fetch_from_google_sheets(sheet_url: str, opinion_column: str = "B", question_column: str = "A") -> tuple[str | None, list[str]]:
+    """Fetch opinions from a public Google Sheet.
+
+    Args:
+        sheet_url: URL of the Google Sheet
+        opinion_column: Column letter containing opinions (default: B)
+        question_column: Column letter for the question (optional, default: A)
+
+    Returns:
+        Tuple of (question, list of opinions)
+    """
+    if not SHEETS_AVAILABLE:
+        raise ImportError("Google Sheets integration requires: pip install gspread google-auth")
+
+    try:
+        # Extract sheet ID from URL
+        match = re.search(r'/spreadsheets/d/([a-zA-Z0-9-_]+)', sheet_url)
+        if not match:
+            raise ValueError("Invalid Google Sheets URL")
+
+        sheet_id = match.group(1)
+
+        # Open the sheet (works for public sheets)
+        gc = gspread.service_account_from_dict({
+            "type": "service_account",
+            "project_id": "streamlit-public-sheets",
+            "private_key_id": "",
+            "private_key": "",
+            "client_email": "",
+            "client_id": "",
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+        })
+
+        # For public sheets, we can use a simpler approach
+        # Just open the sheet without authentication
+        url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
+
+        import pandas as pd
+        import io
+        import requests
+
+        response = requests.get(url)
+        response.raise_for_status()
+
+        df = pd.read_csv(io.StringIO(response.text))
+
+        # Get question from first row if available
+        question = None
+        if question_column and len(df.columns) > 0:
+            col_idx = ord(question_column.upper()) - ord('A')
+            if col_idx < len(df.columns) and len(df) > 0:
+                question = str(df.iloc[0, col_idx])
+
+        # Get opinions from specified column (skip header row)
+        col_idx = ord(opinion_column.upper()) - ord('A')
+        if col_idx >= len(df.columns):
+            raise ValueError(f"Column {opinion_column} not found in sheet")
+
+        opinions = []
+        # Start from row 1 to skip header (or row 0 if no header)
+        start_row = 1 if len(df) > 1 else 0
+        for i in range(start_row, len(df)):
+            opinion = str(df.iloc[i, col_idx]).strip()
+            if opinion and opinion != 'nan':
+                opinions.append(opinion)
+
+        return question, opinions
+
+    except Exception as e:
+        raise Exception(f"Error fetching from Google Sheets: {str(e)}")
 
 # Page configuration
 st.set_page_config(
@@ -80,12 +162,14 @@ with st.sidebar:
         st.markdown("""
         1. **Enter API Key** (sidebar) - Get it from [AI Studio](https://aistudio.google.com/app/apikey)
         2. **Enter your question** below
-        3. **Add participant opinions** - paste or type them in
+        3. **Add participant opinions**:
+           - Option A: Import from Google Sheets (recommended for Google Forms)
+           - Option B: Paste or type them in manually
         4. **Click "Run Opinion Round"** to generate consensus statements
         5. **Optional**: Run a critique round for refinement
 
         **Tips**:
-        - Collect opinions beforehand (Google Form, discussion, etc.)
+        - Collect opinions beforehand via Google Form → auto-saves to Sheets
         - 3-10 participants works well
         - Clear, specific questions get better results
         """)
@@ -126,7 +210,84 @@ st.divider()
 
 # Opinion collection
 st.subheader("👥 Participant Opinions")
+
+# Google Sheets import option
+if SHEETS_AVAILABLE:
+    with st.expander("📊 Import from Google Sheets (Optional)"):
+        st.markdown("""
+        **How to use:**
+        1. Create a Google Form to collect opinions
+        2. Form responses save to a Google Sheet automatically
+        3. Make the Sheet **publicly viewable** (Share → Anyone with link can view)
+        4. Paste the Sheet URL below and click Import
+
+        **Expected format:**
+        - Column A (optional): Question in first row
+        - Column B: Participant opinions (one per row, starting from row 2)
+        """)
+
+        sheet_url = st.text_input(
+            "Google Sheets URL",
+            placeholder="https://docs.google.com/spreadsheets/d/...",
+            help="The sheet must be publicly viewable"
+        )
+
+        col1, col2, col3 = st.columns([2, 1, 1])
+        with col1:
+            opinion_column = st.text_input("Opinion Column", value="B", max_chars=1)
+        with col2:
+            question_column = st.text_input("Question Column (optional)", value="A", max_chars=1)
+
+        if st.button("📥 Import from Sheet"):
+            if not sheet_url:
+                st.error("Please enter a Google Sheets URL")
+            else:
+                try:
+                    with st.spinner("Fetching data from Google Sheets..."):
+                        imported_question, imported_opinions = fetch_from_google_sheets(
+                            sheet_url,
+                            opinion_column=opinion_column,
+                            question_column=question_column if question_column else None
+                        )
+
+                        if not imported_opinions:
+                            st.error("No opinions found in the sheet. Check the column letter and row numbers.")
+                        else:
+                            # Update session state with imported data
+                            st.session_state.opinions = imported_opinions
+
+                            # Also update the question if found
+                            if imported_question and imported_question != 'nan':
+                                st.session_state.imported_question = imported_question
+
+                            st.success(f"✅ Imported {len(imported_opinions)} opinions from Google Sheets!")
+                            if imported_question:
+                                st.info(f"💡 Detected question: {imported_question[:100]}...")
+
+                            # Force a rerun to show the imported data
+                            st.rerun()
+
+                except Exception as e:
+                    st.error(f"Error importing from Google Sheets: {str(e)}")
+                    st.markdown("""
+                    **Troubleshooting:**
+                    - Make sure the Sheet is set to "Anyone with the link can view"
+                    - Check that the column letters are correct
+                    - Verify the URL is correct
+                    """)
+else:
+    with st.expander("📊 Enable Google Sheets Import"):
+        st.info("Install dependencies to enable Google Sheets import:")
+        st.code("pip install gspread google-auth pandas requests")
+
+st.markdown("---")
 st.markdown("Enter opinions from each participant. Add or remove participants as needed.")
+
+# Use imported question if available
+if 'imported_question' in st.session_state and st.session_state.imported_question:
+    if not question:  # Only auto-fill if question field is empty
+        st.info(f"💡 Using question from Google Sheets: {st.session_state.imported_question}")
+        question = st.session_state.imported_question
 
 col1, col2 = st.columns([3, 1])
 with col2:

@@ -15,6 +15,9 @@ cd habermas_machine
 # Install the package and Streamlit
 pip install -e .
 pip install streamlit
+
+# Optional: For Google Forms/Sheets integration (recommended)
+pip install gspread google-auth pandas requests
 ```
 
 ### 2. Get a Google AI Studio API Key
@@ -47,15 +50,21 @@ This will open a web browser automatically. If not, it will show you a URL like 
 
 ### Preparing for Class
 
-**Collect Opinions Beforehand** (Recommended):
+**Method 1: Google Forms + Sheets** (Recommended - Easiest):
 - Create a Google Form with the discussion question
-- Have students submit 1-2 paragraph responses before class
+- Form responses automatically save to Google Sheets
+- Share form link with students 24-48 hours before class
+- During class: Click "Import from Google Sheets" in the app
+- See [GOOGLE_FORMS_SETUP.md](GOOGLE_FORMS_SETUP.md) for detailed instructions
+
+**Method 2: Manual Entry**:
+- Collect opinions via discussion board, email, or other method
 - Copy/paste responses into the app during class
 
-**Or Collect Live**:
+**Method 3: Live Collection**:
 - Ask the question in class
 - Have 5-10 students share their views
-- Type or have a TA type them into the app
+- Type or have a TA type them into the app as students speak
 
 ### Running a Session
 

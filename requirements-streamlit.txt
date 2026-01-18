@@ -2,3 +2,10 @@
 # Install with: pip install -r requirements-streamlit.txt
 
 streamlit>=1.28.0
+
+# Optional: For Google Sheets integration
+# Uncomment and install if you want to import opinions from Google Forms/Sheets
+gspread>=5.0.0
+google-auth>=2.0.0
+pandas>=1.5.0
+requests>=2.28.0
