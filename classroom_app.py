@@ -64,8 +64,8 @@ def fetch_from_google_sheets(sheet_url: str, opinion_column: str = "B", question
             raise ValueError(f"Column {opinion_column} not found in sheet")
 
         opinions = []
-        # Start from row 1 to skip header (or row 0 if no header)
-        start_row = 1 if len(df) > 1 else 0
+        # pandas read_csv already used first row as headers, so start from row 0
+        start_row = 0
 
         # Debug: print what we're reading
         print(f"DEBUG: DataFrame has {len(df)} rows, {len(df.columns)} columns")
@@ -80,14 +80,14 @@ def fetch_from_google_sheets(sheet_url: str, opinion_column: str = "B", question
 
         print(f"DEBUG: Found {len(opinions)} opinions")
 
-        # Get question from the same row as the first opinion if available
+        # Get question from the first row if available
         question = None
-        if question_column and len(df.columns) > 0 and start_row < len(df):
+        if question_column and len(df.columns) > 0 and len(df) > 0:
             col_idx = ord(question_column.upper()) - ord('A')
             if col_idx < len(df.columns):
-                question = str(df.iloc[start_row, col_idx]).strip()
-                # Check if it's actually a question (not a header)
-                if question == 'nan' or question.lower() in ['question', 'questions']:
+                question = str(df.iloc[0, col_idx]).strip()
+                # Check if it's actually a question (not empty or 'nan')
+                if question == 'nan' or not question:
                     question = None
 
         return question, opinions
