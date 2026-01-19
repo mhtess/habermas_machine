@@ -255,6 +255,10 @@ if SHEETS_AVAILABLE:
                             # Update session state with imported data
                             st.session_state.opinions = imported_opinions
 
+                            # Also set individual widget states (since text areas use keys)
+                            for i, op in enumerate(imported_opinions):
+                                st.session_state[f"opinion_{i}"] = op
+
                             # Also update the question if found
                             if imported_question and imported_question != 'nan':
                                 st.session_state.imported_question = imported_question
