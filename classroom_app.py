@@ -66,10 +66,19 @@ def fetch_from_google_sheets(sheet_url: str, opinion_column: str = "B", question
         opinions = []
         # Start from row 1 to skip header (or row 0 if no header)
         start_row = 1 if len(df) > 1 else 0
+
+        # Debug: print what we're reading
+        print(f"DEBUG: DataFrame has {len(df)} rows, {len(df.columns)} columns")
+        print(f"DEBUG: Column names: {df.columns.tolist()}")
+        print(f"DEBUG: Looking for opinions in column index {col_idx}")
+
         for i in range(start_row, len(df)):
             opinion = str(df.iloc[i, col_idx]).strip()
+            print(f"DEBUG: Row {i}, opinion value: '{opinion}'")
             if opinion and opinion != 'nan':
                 opinions.append(opinion)
+
+        print(f"DEBUG: Found {len(opinions)} opinions")
 
         # Get question from the same row as the first opinion if available
         question = None
