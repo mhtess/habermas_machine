@@ -17,8 +17,8 @@ from habermas_machine.social_choice import utils as sc_utils
 
 # Optional Google Sheets integration
 try:
-    import gspread
-    from google.oauth2.service_account import Credentials
+    import pandas as pd
+    import requests
     SHEETS_AVAILABLE = True
 except ImportError:
     SHEETS_AVAILABLE = False
@@ -36,9 +36,13 @@ def fetch_from_google_sheets(sheet_url: str, opinion_column: str = "B", question
         Tuple of (question, list of opinions)
     """
     if not SHEETS_AVAILABLE:
-        raise ImportError("Google Sheets integration requires: pip install gspread google-auth")
+        raise ImportError("Google Sheets integration requires: pip install pandas requests")
 
     try:
+        import pandas as pd
+        import io
+        import requests
+
         # Extract sheet ID from URL
         match = re.search(r'/spreadsheets/d/([a-zA-Z0-9-_]+)', sheet_url)
         if not match:
@@ -46,25 +50,8 @@ def fetch_from_google_sheets(sheet_url: str, opinion_column: str = "B", question
 
         sheet_id = match.group(1)
 
-        # Open the sheet (works for public sheets)
-        gc = gspread.service_account_from_dict({
-            "type": "service_account",
-            "project_id": "streamlit-public-sheets",
-            "private_key_id": "",
-            "private_key": "",
-            "client_email": "",
-            "client_id": "",
-            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-            "token_uri": "https://oauth2.googleapis.com/token",
-        })
-
-        # For public sheets, we can use a simpler approach
-        # Just open the sheet without authentication
+        # For public sheets, export as CSV (no authentication needed)
         url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
-
-        import pandas as pd
-        import io
-        import requests
 
         response = requests.get(url)
         response.raise_for_status()
@@ -278,7 +265,7 @@ if SHEETS_AVAILABLE:
 else:
     with st.expander("📊 Enable Google Sheets Import"):
         st.info("Install dependencies to enable Google Sheets import:")
-        st.code("pip install gspread google-auth pandas requests")
+        st.code("pip install pandas requests")
 
 st.markdown("---")
 st.markdown("Enter opinions from each participant. Add or remove participants as needed.")

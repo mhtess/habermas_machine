@@ -16,8 +16,8 @@ cd habermas_machine
 pip install -e .
 pip install streamlit
 
-# Optional: For Google Forms/Sheets integration (recommended)
-pip install gspread google-auth pandas requests
+# For Google Forms/Sheets integration (recommended)
+pip install pandas requests
 ```
 
 ### 2. Get a Google AI Studio API Key

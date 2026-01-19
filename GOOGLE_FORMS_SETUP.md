@@ -7,7 +7,7 @@ This guide shows you how to seamlessly collect student opinions using Google For
 ### Step 1: Install Additional Dependencies
 
 ```bash
-pip install gspread google-auth pandas requests
+pip install pandas requests
 ```
 
 ### Step 2: Create a Google Form
@@ -155,7 +155,7 @@ Instructions: Share your perspective and the key factors that inform your view (
 
 Install the required packages:
 ```bash
-pip install gspread google-auth pandas requests
+pip install pandas requests
 ```
 
 ## Advanced: Multiple Rounds
