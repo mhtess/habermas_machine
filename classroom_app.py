@@ -130,11 +130,10 @@ with st.sidebar:
     model_name = st.selectbox(
         "Gemini Model",
         options=[
-            "gemini-2.0-flash-exp",
-            "gemini-1.5-flash",
-            "gemini-1.5-pro"
+            "gemini-flash-latest",
+            "gemini-pro-latest",
         ],
-        help="Recommended: gemini-2.0-flash-exp for best compatibility"
+        help="Recommended: gemini-flash-latest for best compatibility"
     )
 
     # Number of candidates
