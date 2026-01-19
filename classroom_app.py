@@ -58,13 +58,6 @@ def fetch_from_google_sheets(sheet_url: str, opinion_column: str = "B", question
 
         df = pd.read_csv(io.StringIO(response.text))
 
-        # Get question from first row if available
-        question = None
-        if question_column and len(df.columns) > 0:
-            col_idx = ord(question_column.upper()) - ord('A')
-            if col_idx < len(df.columns) and len(df) > 0:
-                question = str(df.iloc[0, col_idx])
-
         # Get opinions from specified column (skip header row)
         col_idx = ord(opinion_column.upper()) - ord('A')
         if col_idx >= len(df.columns):
@@ -77,6 +70,16 @@ def fetch_from_google_sheets(sheet_url: str, opinion_column: str = "B", question
             opinion = str(df.iloc[i, col_idx]).strip()
             if opinion and opinion != 'nan':
                 opinions.append(opinion)
+
+        # Get question from the same row as the first opinion if available
+        question = None
+        if question_column and len(df.columns) > 0 and start_row < len(df):
+            col_idx = ord(question_column.upper()) - ord('A')
+            if col_idx < len(df.columns):
+                question = str(df.iloc[start_row, col_idx]).strip()
+                # Check if it's actually a question (not a header)
+                if question == 'nan' or question.lower() in ['question', 'questions']:
+                    question = None
 
         return question, opinions
 
