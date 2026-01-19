@@ -67,18 +67,10 @@ def fetch_from_google_sheets(sheet_url: str, opinion_column: str = "B", question
         # pandas read_csv already used first row as headers, so start from row 0
         start_row = 0
 
-        # Debug: print what we're reading
-        print(f"DEBUG: DataFrame has {len(df)} rows, {len(df.columns)} columns")
-        print(f"DEBUG: Column names: {df.columns.tolist()}")
-        print(f"DEBUG: Looking for opinions in column index {col_idx}")
-
         for i in range(start_row, len(df)):
             opinion = str(df.iloc[i, col_idx]).strip()
-            print(f"DEBUG: Row {i}, opinion value: '{opinion}'")
             if opinion and opinion != 'nan':
                 opinions.append(opinion)
-
-        print(f"DEBUG: Found {len(opinions)} opinions")
 
         # Get question from the first row if available
         question = None
@@ -352,9 +344,14 @@ if st.button("🚀 Run Opinion Round", type="primary", use_container_width=True)
                 social_choice_method=social_choice_method,
                 num_candidates=num_candidates,
                 num_citizens=len(valid_opinions),
-                verbose=False,
+                verbose=True,  # Enable logging to terminal
                 num_retries_on_error=num_retries,
             )
+
+            print("\n" + "="*80)
+            print(f"STARTING DELIBERATION: {question}")
+            print(f"Participants: {len(valid_opinions)}, Candidates: {num_candidates}")
+            print("="*80 + "\n")
 
             st.session_state.hm = hm
 
@@ -399,6 +396,64 @@ if st.session_state.winner:
     with col1:
         st.markdown("*Participants can critique the winning statement above. The machine will generate an improved version.*")
 
+    # Google Sheets import for critiques
+    if SHEETS_AVAILABLE:
+        with st.expander("📊 Import Critiques from Google Sheets (Optional)"):
+            st.markdown("""
+            **How to use:**
+            1. Share the winning statement with students
+            2. Create a new Google Form asking: "What would you change about this statement?"
+            3. Make the response Sheet **publicly viewable**
+            4. Paste the Sheet URL below and click Import
+
+            **Expected format:**
+            - Column A: Critique responses (one per row, starting from row 2)
+            """)
+
+            critique_sheet_url = st.text_input(
+                "Google Sheets URL for Critiques",
+                placeholder="https://docs.google.com/spreadsheets/d/...",
+                help="The sheet must be publicly viewable",
+                key="critique_sheet_url"
+            )
+
+            critique_col = st.text_input("Critique Column", value="B", max_chars=1, key="critique_col")
+
+            if st.button("📥 Import Critiques from Sheet"):
+                if not critique_sheet_url:
+                    st.error("Please enter a Google Sheets URL")
+                else:
+                    try:
+                        with st.spinner("Fetching critiques from Google Sheets..."):
+                            _, imported_critiques = fetch_from_google_sheets(
+                                critique_sheet_url,
+                                opinion_column=critique_col,
+                                question_column=None
+                            )
+
+                            if not imported_critiques:
+                                st.error("No critiques found in the sheet. Check the column letter.")
+                            else:
+                                # Update session state with imported critiques
+                                st.session_state.critiques = imported_critiques
+
+                                # Also set individual widget states
+                                for i, crit in enumerate(imported_critiques):
+                                    st.session_state[f"critique_{i}"] = crit
+
+                                st.success(f"✅ Imported {len(imported_critiques)} critiques from Google Sheets!")
+
+                                # Force a rerun to show the imported data
+                                st.rerun()
+
+                    except Exception as e:
+                        st.error(f"Error importing critiques: {str(e)}")
+                        st.markdown("""
+                        **Troubleshooting:**
+                        - Make sure the Sheet is set to "Anyone with the link can view"
+                        - Check that the column letter is correct
+                        """)
+
     # Critique inputs
     for i in range(len(valid_opinions)):
         st.session_state.critiques[i] = st.text_area(
@@ -415,6 +470,11 @@ if st.session_state.winner:
         if len(valid_critiques) < 2:
             st.error("Please enter at least 2 critiques to run the critique round.")
             st.stop()
+
+        print("\n" + "="*80)
+        print(f"STARTING CRITIQUE ROUND")
+        print(f"Number of critiques: {len(valid_critiques)}")
+        print("="*80 + "\n")
 
         with st.spinner("Running critique round... This may take 30-60 seconds."):
             try:
