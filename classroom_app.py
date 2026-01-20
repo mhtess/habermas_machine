@@ -454,7 +454,10 @@ if st.session_state.winner:
                         """)
 
     # Critique inputs
-    for i in range(len(valid_opinions)):
+    # Determine number of critiques based on opinions
+    num_critique_boxes = len([op for op in st.session_state.opinions if op.strip()])
+
+    for i in range(num_critique_boxes):
         st.session_state.critiques[i] = st.text_area(
             f"Critique from Participant {i+1}",
             value=st.session_state.critiques[i],
