@@ -10,7 +10,11 @@ Usage:
     streamlit run classroom_app.py
 """
 
+import io
 import re
+import sys
+import threading
+import time
 import streamlit as st
 from habermas_machine import machine, types
 from habermas_machine.social_choice import utils as sc_utils
@@ -362,17 +366,65 @@ if st.button("🚀 Run Opinion Round", type="primary", use_container_width=True)
             st.error(f"Error initializing: {str(e)}")
             st.stop()
 
-    # Run deliberation
-    with st.spinner("Running deliberation... This may take 30-60 seconds."):
-        try:
-            winner, sorted_statements = hm.mediate(valid_opinions)
+    # Run deliberation with progress tracking
+    try:
+        with st.status("Running deliberation...", expanded=True) as status:
+            status.write("🔄 Generating candidate statements...")
+
+            # Capture stdout to monitor progress
+            output_buffer = io.StringIO()
+            result_container = [None, None]  # [winner, sorted_statements]
+            exception_container = [None]
+
+            def run_mediate():
+                """Run mediation in thread with output capture."""
+                old_stdout = sys.stdout
+                sys.stdout = output_buffer
+                try:
+                    winner, sorted_statements = hm.mediate(valid_opinions)
+                    result_container[0] = winner
+                    result_container[1] = sorted_statements
+                except Exception as e:
+                    exception_container[0] = e
+                finally:
+                    sys.stdout = old_stdout
+
+            # Start deliberation in background thread
+            thread = threading.Thread(target=run_mediate)
+            thread.start()
+
+            # Monitor progress and update status
+            phase = "generating"
+            while thread.is_alive():
+                output = output_buffer.getvalue()
+
+                # Check if we've moved to ranking phase
+                if "Statements generated:" in output and phase == "generating":
+                    phase = "ranking"
+                    status.write("✅ Candidate statements generated")
+                    status.write(f"🔄 Predicting rankings for {len(valid_opinions)} participants...")
+
+                time.sleep(0.1)
+
+            # Wait for thread to complete
+            thread.join()
+
+            # Check for exceptions
+            if exception_container[0]:
+                raise exception_container[0]
+
+            # Get results
+            winner, sorted_statements = result_container
             st.session_state.winner = winner
             st.session_state.sorted_statements = sorted_statements
             st.session_state.critiques = [""] * len(valid_opinions)
-            st.success("✅ Opinion round complete!")
-        except Exception as e:
-            st.error(f"Error running deliberation: {str(e)}")
-            st.exception(e)
+
+            status.write("✅ Rankings computed")
+            status.update(label="✅ Deliberation complete!", state="complete")
+
+    except Exception as e:
+        st.error(f"Error running deliberation: {str(e)}")
+        st.exception(e)
 
 # Display results
 if st.session_state.winner:
@@ -482,9 +534,57 @@ if st.session_state.winner:
         print(f"Number of critiques: {len(valid_critiques)}")
         print("="*80 + "\n")
 
-        with st.spinner("Running critique round... This may take 30-60 seconds."):
-            try:
-                winner, sorted_statements = st.session_state.hm.mediate(valid_critiques)
+        try:
+            with st.status("Running critique round...", expanded=True) as status:
+                status.write("🔄 Generating refined candidate statements...")
+
+                # Capture stdout to monitor progress
+                output_buffer = io.StringIO()
+                result_container = [None, None]  # [winner, sorted_statements]
+                exception_container = [None]
+
+                def run_critique_mediate():
+                    """Run mediation in thread with output capture."""
+                    old_stdout = sys.stdout
+                    sys.stdout = output_buffer
+                    try:
+                        winner, sorted_statements = st.session_state.hm.mediate(valid_critiques)
+                        result_container[0] = winner
+                        result_container[1] = sorted_statements
+                    except Exception as e:
+                        exception_container[0] = e
+                    finally:
+                        sys.stdout = old_stdout
+
+                # Start critique round in background thread
+                thread = threading.Thread(target=run_critique_mediate)
+                thread.start()
+
+                # Monitor progress and update status
+                phase = "generating"
+                while thread.is_alive():
+                    output = output_buffer.getvalue()
+
+                    # Check if we've moved to ranking phase
+                    if "Statements generated:" in output and phase == "generating":
+                        phase = "ranking"
+                        status.write("✅ Refined statements generated")
+                        status.write(f"🔄 Predicting rankings for {len(valid_critiques)} participants...")
+
+                    time.sleep(0.1)
+
+                # Wait for thread to complete
+                thread.join()
+
+                # Check for exceptions
+                if exception_container[0]:
+                    raise exception_container[0]
+
+                # Get results
+                winner, sorted_statements = result_container
+
+                status.write("✅ Rankings computed")
+                status.update(label="✅ Critique round complete!", state="complete")
 
                 st.divider()
                 st.subheader("📊 Results - Critique Round")
@@ -498,9 +598,9 @@ if st.session_state.winner:
                         st.write(stmt)
                         st.divider()
 
-            except Exception as e:
-                st.error(f"Error running critique round: {str(e)}")
-                st.exception(e)
+        except Exception as e:
+            st.error(f"Error running critique round: {str(e)}")
+            st.exception(e)
 
 # Footer
 st.divider()
