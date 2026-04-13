@@ -309,12 +309,16 @@ elif num_participants < len(st.session_state.opinions):
 
 # Opinion input fields
 for i in range(num_participants):
-    st.session_state.opinions[i] = st.text_area(
+    # Initialize widget key from opinions list if not already set
+    if f"opinion_{i}" not in st.session_state:
+        st.session_state[f"opinion_{i}"] = st.session_state.opinions[i]
+    st.text_area(
         f"Participant {i+1}",
-        value=st.session_state.opinions[i],
         height=120,
         key=f"opinion_{i}"
     )
+    # Sync widget value back to opinions list
+    st.session_state.opinions[i] = st.session_state[f"opinion_{i}"]
 
 st.divider()
 
