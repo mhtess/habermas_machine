@@ -16,6 +16,7 @@
 """Habermas Machine."""
 
 from collections.abc import Sequence
+import concurrent.futures
 
 import numpy as np
 
@@ -67,8 +68,16 @@ class HabermasMachine:
       seed: int | None = None,
       verbose: bool = False,
       num_retries_on_error: int | None = 8,
+      max_workers: int = 1,
   ):
-    """Initializes the Habermas Machine."""
+    """Initializes the Habermas Machine.
+
+    Args:
+      max_workers: Max concurrent LLM calls for per-citizen ranking. 1 keeps
+        the original serial behavior. Higher values issue rankings in parallel
+        via a thread pool (LLM calls are I/O-bound, so threads work well).
+        The effective pool size is min(max_workers, num_citizens).
+    """
     self._question = question  # Question to be answered.
     self._round = 0  # Current round (round 0 is the opinion round).
     self._critiques = []  # Critiques from current and previous rounds.
@@ -90,6 +99,9 @@ class HabermasMachine:
     self._opinions = []  # Initial opinions.
     # Number of retries when the model returns an erroroneous response.
     self._num_retries_on_error = num_retries_on_error
+    if max_workers < 1:
+      raise ValueError(f'max_workers must be >= 1, got {max_workers}.')
+    self._max_workers = max_workers
 
   def _get_new_seed(self):
     """Generates a new random seed."""
@@ -124,31 +136,59 @@ class HabermasMachine:
 
   def _get_rankings(
       self, statements: list[str]) -> tuple[np.ndarray, list[None | str]]:
-    """Gets rankings over all candidates for each citizen."""
-    all_rankings = []
-    explanations = []
+    """Gets rankings over all candidates for each citizen.
+
+    Per-citizen ranking calls are independent and I/O-bound on the LLM, so
+    they're dispatched to a thread pool when max_workers > 1. The RNG draws
+    (permutation + seed) happen serially before dispatch so outputs are
+    deterministic for a given seed regardless of max_workers.
+    """
+    # Pre-compute per-citizen inputs serially — keeps RNG draws deterministic.
+    tasks = []
     for i in range(self._num_citizens):
-      # Shuffle the statements to avoid ordering bias.
       indices = self._rng.permutation(self._num_candidates)
       shuffled_statements = [statements[j] for j in indices]
+      seed = self._get_new_seed()
+      tasks.append((i, indices, shuffled_statements, seed))
 
+    previous_winner = (
+        self._previous_winners[-1] if self._round > 0 else None
+    )
+
+    def run_one(task):
+      i, _indices, shuffled_statements, seed = task
       ranking, explanation = self._reward_model.predict_ranking(
           llm_client=self._reward_client,
           question=self._question,
           opinion=self._opinions[i],
           statements=shuffled_statements,
-          previous_winner=(
-              self._previous_winners[-1] if self._round > 0 else None
-          ),
+          previous_winner=previous_winner,
           critique=self._critiques[-1][i] if self._round > 0 else None,
-          seed=self._get_new_seed(),
+          seed=seed,
           num_retries_on_error=self._num_retries_on_error,
       )
+      return i, ranking, explanation
 
+    results: list[tuple[int, np.ndarray | None, str | None]] = [
+        None] * self._num_citizens  # type: ignore[list-item]
+    effective_workers = min(self._max_workers, self._num_citizens)
+    if effective_workers > 1:
+      with concurrent.futures.ThreadPoolExecutor(
+          max_workers=effective_workers) as pool:
+        for i, ranking, explanation in pool.map(run_one, tasks):
+          results[i] = (i, ranking, explanation)
+    else:
+      for task in tasks:
+        i, ranking, explanation = run_one(task)
+        results[i] = (i, ranking, explanation)
+
+    all_rankings = []
+    explanations = []
+    for i, (_, ranking, explanation) in enumerate(results):
       if ranking is None:
         raise ValueError(
             f"Ranking is None for citizen {i+1}. Explanation: {explanation}")
-
+      indices = tasks[i][1]
       unshuffled_ranking = np.full_like(ranking, fill_value=types.RANKING_MOCK)
       unshuffled_ranking[indices] = ranking
       all_rankings.append(unshuffled_ranking)
