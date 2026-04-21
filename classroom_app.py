@@ -484,12 +484,17 @@ if st.session_state.winner:
                 result_container = [None, None]  # [winner, sorted_statements]
                 exception_container = [None]
 
+                # Pull hm into a local variable so the worker thread doesn't
+                # touch st.session_state (which isn't safe without a
+                # ScriptRunContext and fails outright on newer Streamlit).
+                hm = st.session_state.hm
+
                 def run_critique_mediate():
                     """Run mediation in thread with output capture."""
                     old_stdout = sys.stdout
                     sys.stdout = output_buffer
                     try:
-                        winner, sorted_statements = st.session_state.hm.mediate(valid_critiques)
+                        winner, sorted_statements = hm.mediate(valid_critiques)
                         result_container[0] = winner
                         result_container[1] = sorted_statements
                     except Exception as e:
