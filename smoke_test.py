@@ -175,6 +175,7 @@ def build_machine(
       num_candidates=args.num_candidates,
       num_citizens=args.num_citizens,
       seed=0,
+      max_workers=args.max_workers,
   )
   return hm, statement_client, reward_client
 
@@ -251,6 +252,9 @@ def main() -> int:
   parser.add_argument('--sheets-only', action='store_true',
                       help='Fetch from sheets and print what was parsed, '
                            'then exit without running the pipeline.')
+  parser.add_argument('--max-workers', type=int, default=1,
+                      help='Concurrent ranking LLM calls (default 1 = '
+                           'serial). Capped at num_citizens.')
   args = parser.parse_args()
 
   needs_api = not args.mock and not args.sheets_only
@@ -308,7 +312,8 @@ def main() -> int:
 
   mode = 'mock' if args.mock else f'real API ({args.model})'
   print(f'\nSmoke test: {mode}, '
-        f'{args.num_citizens} citizens, {args.num_candidates} candidates')
+        f'{args.num_citizens} citizens, {args.num_candidates} candidates, '
+        f'max_workers={args.max_workers}')
   print(f'Question: {question}')
 
   hm, statement_client, reward_client = build_machine(args, question)
