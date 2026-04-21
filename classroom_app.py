@@ -293,6 +293,7 @@ if st.button("🚀 Run Opinion Round", type="primary", use_container_width=True)
                 num_citizens=len(valid_opinions),
                 verbose=True,  # Enable logging to terminal
                 num_retries_on_error=num_retries,
+                max_workers=len(valid_opinions),
             )
 
             print("\n" + "="*80)
