@@ -11,7 +11,6 @@ Usage:
 """
 
 import io
-import re
 import sys
 import threading
 import time
@@ -23,73 +22,10 @@ from habermas_machine.social_choice import utils as sc_utils
 try:
     import pandas as pd
     import requests
+    from sheets_io import fetch_from_google_sheets
     SHEETS_AVAILABLE = True
 except ImportError:
     SHEETS_AVAILABLE = False
-
-
-def fetch_from_google_sheets(sheet_url: str, opinion_column: str = "B", question_column: str = "A") -> tuple[str | None, list[str]]:
-    """Fetch opinions from a public Google Sheet.
-
-    Args:
-        sheet_url: URL of the Google Sheet
-        opinion_column: Column letter containing opinions (default: B)
-        question_column: Column letter for the question (optional, default: A)
-
-    Returns:
-        Tuple of (question, list of opinions)
-    """
-    if not SHEETS_AVAILABLE:
-        raise ImportError("Google Sheets integration requires: pip install pandas requests")
-
-    try:
-        import pandas as pd
-        import io
-        import requests
-
-        # Extract sheet ID from URL
-        match = re.search(r'/spreadsheets/d/([a-zA-Z0-9-_]+)', sheet_url)
-        if not match:
-            raise ValueError("Invalid Google Sheets URL")
-
-        sheet_id = match.group(1)
-
-        # For public sheets, export as CSV (no authentication needed)
-        url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
-
-        response = requests.get(url)
-        response.raise_for_status()
-
-        df = pd.read_csv(io.StringIO(response.text))
-
-        # Get opinions from specified column (skip header row)
-        col_idx = ord(opinion_column.upper()) - ord('A')
-        if col_idx >= len(df.columns):
-            raise ValueError(f"Column {opinion_column} not found in sheet")
-
-        opinions = []
-        # pandas read_csv already used first row as headers, so start from row 0
-        start_row = 0
-
-        for i in range(start_row, len(df)):
-            opinion = str(df.iloc[i, col_idx]).strip()
-            if opinion and opinion != 'nan':
-                opinions.append(opinion)
-
-        # Get question from the first row if available
-        question = None
-        if question_column and len(df.columns) > 0 and len(df) > 0:
-            col_idx = ord(question_column.upper()) - ord('A')
-            if col_idx < len(df.columns):
-                question = str(df.iloc[0, col_idx]).strip()
-                # Check if it's actually a question (not empty or 'nan')
-                if question == 'nan' or not question:
-                    question = None
-
-        return question, opinions
-
-    except Exception as e:
-        raise Exception(f"Error fetching from Google Sheets: {str(e)}")
 
 # Page configuration
 st.set_page_config(

@@ -179,6 +179,52 @@ def build_machine(
   return hm, statement_client, reward_client
 
 
+DEFAULT_QUESTION = 'Should public libraries stay open on Sundays?'
+DEFAULT_OPINIONS = [
+    'Yes, Sundays are when working people actually have time to visit.',
+    'No, staffing costs are too high for the weekend demand we see.',
+    'Only if the community demonstrates sustained demand first.',
+    'Yes, libraries are one of the last free public spaces.',
+    'Open a few branches on rotation rather than all of them.',
+]
+DEFAULT_CRITIQUES = [
+    'This statement ignores the staffing cost concern.',
+    'It should acknowledge that demand varies by branch.',
+    'I would like a stronger nod to equity of access.',
+    'The wording is fine but too vague on implementation.',
+    'Consider mentioning a trial-period approach.',
+]
+
+
+def _pad(values: list[str], n: int) -> list[str]:
+  return [values[i % len(values)] for i in range(n)]
+
+
+def _load_from_sheet(
+    url: str,
+    label: str,
+    opinion_column: str,
+    question_column: str,
+) -> tuple[str | None, list[str]]:
+  """Fetches (question, values) from a public Google Sheet."""
+  from sheets_io import fetch_from_google_sheets
+  print(f'\nFetching {label} from Google Sheets...')
+  start = time.perf_counter()
+  question, values = fetch_from_google_sheets(
+      url,
+      opinion_column=opinion_column,
+      question_column=question_column,
+  )
+  duration = time.perf_counter() - start
+  print(f'  fetched {len(values)} row(s) in {duration:.2f}s')
+  if question:
+    print(f'  question from sheet: {question}')
+  for i, v in enumerate(values, 1):
+    preview = v[:100] + ('...' if len(v) > 100 else '')
+    print(f'  [{i}] {preview}')
+  return question, values
+
+
 def main() -> int:
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument('--model', default='gemini-flash-latest',
@@ -191,9 +237,24 @@ def main() -> int:
                       help='Only run the opinion round.')
   parser.add_argument('--api-key', default=None,
                       help='Google API key (else read from GOOGLE_API_KEY).')
+  parser.add_argument('--opinions-sheet', default=None,
+                      help='Public Google Sheets URL to pull opinions from. '
+                           'Overrides the built-in defaults and sets '
+                           'num_citizens to the number of rows fetched.')
+  parser.add_argument('--critiques-sheet', default=None,
+                      help='Public Google Sheets URL to pull critiques from.')
+  parser.add_argument('--opinion-column', default='B',
+                      help='Column letter for opinions/critiques (default B).')
+  parser.add_argument('--question-column', default='A',
+                      help="Column letter for question (default A, or '' to "
+                           'skip).')
+  parser.add_argument('--sheets-only', action='store_true',
+                      help='Fetch from sheets and print what was parsed, '
+                           'then exit without running the pipeline.')
   args = parser.parse_args()
 
-  if not args.mock:
+  needs_api = not args.mock and not args.sheets_only
+  if needs_api:
     if args.api_key:
       os.environ['GOOGLE_API_KEY'] = args.api_key
     if not os.environ.get('GOOGLE_API_KEY'):
@@ -202,33 +263,51 @@ def main() -> int:
             'Gemini API.')
       return 0
 
-  # A small realistic scenario. The number of opinions/critiques must match
-  # args.num_citizens; we slice / repeat as needed so the script works for any
-  # citizen count.
-  question = 'Should public libraries stay open on Sundays?'
-  base_opinions = [
-      'Yes, Sundays are when working people actually have time to visit.',
-      'No, staffing costs are too high for the weekend demand we see.',
-      'Only if the community demonstrates sustained demand first.',
-      'Yes, libraries are one of the last free public spaces.',
-      'Open a few branches on rotation rather than all of them.',
-  ]
-  base_critiques = [
-      'This statement ignores the staffing cost concern.',
-      'It should acknowledge that demand varies by branch.',
-      'I would like a stronger nod to equity of access.',
-      'The wording is fine but too vague on implementation.',
-      'Consider mentioning a trial-period approach.',
-  ]
+  question: str | None = DEFAULT_QUESTION
+  opinions: list[str] | None = None
+  critiques: list[str] | None = None
 
-  def pad(values: list[str], n: int) -> list[str]:
-    return [values[i % len(values)] for i in range(n)]
+  if args.opinions_sheet:
+    sheet_question, opinions = _load_from_sheet(
+        args.opinions_sheet, 'opinions',
+        args.opinion_column, args.question_column,
+    )
+    if sheet_question:
+      question = sheet_question
+    if not opinions:
+      print('ERROR: no opinions found in the sheet.')
+      return 1
 
-  opinions = pad(base_opinions, args.num_citizens)
-  critiques = pad(base_critiques, args.num_citizens)
+  if args.critiques_sheet:
+    _, critiques = _load_from_sheet(
+        args.critiques_sheet, 'critiques',
+        args.opinion_column, args.question_column,
+    )
+    if not critiques:
+      print('ERROR: no critiques found in the sheet.')
+      return 1
+
+  if args.sheets_only:
+    print('\n--sheets-only: skipping pipeline.')
+    return 0
+
+  # If we pulled opinions from a sheet, let that define num_citizens so the
+  # data lines up with the machine's expected count.
+  if opinions is not None:
+    args.num_citizens = len(opinions)
+  else:
+    opinions = _pad(DEFAULT_OPINIONS, args.num_citizens)
+
+  if critiques is not None:
+    if len(critiques) != args.num_citizens:
+      print(f'ERROR: got {len(critiques)} critiques but num_citizens is '
+            f'{args.num_citizens} (must match).')
+      return 1
+  else:
+    critiques = _pad(DEFAULT_CRITIQUES, args.num_citizens)
 
   mode = 'mock' if args.mock else f'real API ({args.model})'
-  print(f'Smoke test: {mode}, '
+  print(f'\nSmoke test: {mode}, '
         f'{args.num_citizens} citizens, {args.num_candidates} candidates')
   print(f'Question: {question}')
 
