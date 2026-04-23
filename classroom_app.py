@@ -16,6 +16,7 @@ import threading
 import time
 import streamlit as st
 from habermas_machine import machine, types
+from habermas_machine.llm_client import aistudio_client
 from habermas_machine.social_choice import utils as sc_utils
 
 # Optional Google Sheets integration
@@ -60,15 +61,7 @@ with st.sidebar:
     # Model selection
     model_name = st.selectbox(
         "Gemini Model",
-        options=[
-            "gemini-2.5-flash-lite",
-            "gemini-flash-latest",
-            "gemini-pro-latest",
-            "gemini-3-flash-preview",
-            "gemini-3-pro-preview",
-            "gemini-2.5-flash",
-            "gemini-2.5-pro"
-        ],
+        options=list(aistudio_client.SUPPORTED_MODELS),
         help="Recommended: gemini-flash-latest for best compatibility"
     )
 
