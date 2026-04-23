@@ -20,17 +20,6 @@ import traceback
 from habermas_machine.llm_client import aistudio_client
 
 
-# Keep in sync with classroom_app.py's model selectbox.
-MODELS = (
-    'gemini-2.5-flash-lite',
-    'gemini-flash-latest',
-    'gemini-pro-latest',
-    'gemini-3-flash-preview',
-    'gemini-3-pro-preview',
-    'gemini-2.5-flash',
-    'gemini-2.5-pro',
-)
-
 PROBE_PROMPT = 'Reply with the single word: ok'
 
 
@@ -94,7 +83,7 @@ def main() -> int:
     print('GOOGLE_API_KEY not set. Export it or pass --api-key.')
     return 2
 
-  models = tuple(args.model) if args.model else MODELS
+  models = tuple(args.model) if args.model else aistudio_client.SUPPORTED_MODELS
   print(f'Probing {len(models)} model(s) with prompt: {PROBE_PROMPT!r}\n')
 
   results = [probe(m, args.max_tokens, args.temperature) for m in models]

@@ -26,6 +26,18 @@ from habermas_machine.llm_client import base_client
 from habermas_machine.llm_client import utils
 
 
+# Gemini models exposed in the classroom UI and covered by the probe script.
+SUPPORTED_MODELS = (
+    'gemini-2.5-flash-lite',
+    'gemini-flash-latest',
+    'gemini-pro-latest',
+    'gemini-3-flash-preview',
+    'gemini-3-pro-preview',
+    'gemini-2.5-flash',
+    'gemini-2.5-pro',
+)
+
+
 DEFAULT_SAFETY_SETTINGS = (
     {
         'category': 'HARM_CATEGORY_HARASSMENT',
