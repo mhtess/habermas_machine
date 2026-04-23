@@ -526,17 +526,17 @@ if st.session_state.winner:
                 status.write("✅ Rankings computed")
                 status.update(label="✅ Critique round complete!", state="complete")
 
-                st.divider()
-                st.subheader("📊 Results - Critique Round")
+            st.divider()
+            st.subheader("📊 Results - Critique Round")
 
-                st.markdown("### 🏆 Refined Consensus Statement")
-                st.success(winner)
+            st.markdown("### 🏆 Refined Consensus Statement")
+            st.success(winner)
 
-                with st.expander("📋 View All Refined Statements (Ranked)"):
-                    for i, stmt in enumerate(sorted_statements, 1):
-                        st.markdown(f"**Statement {i}:**")
-                        st.write(stmt)
-                        st.divider()
+            with st.expander("📋 View All Refined Statements (Ranked)"):
+                for i, stmt in enumerate(sorted_statements, 1):
+                    st.markdown(f"**Statement {i}:**")
+                    st.write(stmt)
+                    st.divider()
 
         except Exception as e:
             st.error(f"Error running critique round: {str(e)}")
