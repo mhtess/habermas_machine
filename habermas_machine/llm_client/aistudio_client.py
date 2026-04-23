@@ -124,8 +124,16 @@ class AIStudioClient(base_client.LLMClient):
     try:
       # AI Studio returns a list of parts, but we only use the first one.
       response = sample.candidates[0].content.parts[0].text
-    except ValueError as e:
-      print('An error occurred: ', e)
+    except (ValueError, IndexError, AttributeError) as e:
+      # Empty `parts` happens e.g. when a thinking model exhausts
+      # max_output_tokens on internal thoughts, or when safety filtering
+      # strips the content. Surface the finish_reason so the cause is clear.
+      finish_reason = None
+      try:
+        finish_reason = sample.candidates[0].finish_reason
+      except (IndexError, AttributeError):
+        pass
+      print(f'No text in response (finish_reason={finish_reason}): {e}')
       print(f'prompt: {prompt}')
       print(f'sample: {sample}')
       response = ''
