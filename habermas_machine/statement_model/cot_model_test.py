@@ -34,8 +34,8 @@ class COTModelTest(parameterized.TestCase):
     self.assertIn(question, prompt)
     for opinion in opinions:
       self.assertIn(opinion, prompt)
-    self.assertIn("<answer>", prompt)
-    self.assertIn("<sep>", prompt)
+    self.assertIn("## Reasoning:", prompt)
+    self.assertIn("## Draft Consensus Statement:", prompt)
 
   def test_generate_opinion_critique_prompt(self):
     """Tests the _generate_opinion_critique_prompt method."""
@@ -59,8 +59,8 @@ class COTModelTest(parameterized.TestCase):
     self.assertIn(previous_winner, prompt)
     for critique in critiques:
       self.assertIn(critique, prompt)
-    self.assertIn("<answer>", prompt)
-    self.assertIn("<sep>", prompt)
+    self.assertIn("## Reasoning:", prompt)
+    self.assertIn("## Revised Consensus Statement:", prompt)
 
   def test_generate_prompt(self):
     """Tests the _generate_prompt method."""
