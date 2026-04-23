@@ -132,6 +132,44 @@ class HabermasMachineTest(parameterized.TestCase):
     with self.assertRaises(ValueError):
       hm.mediate(['critique1', 'critique2', 'critique3'])
 
+  def _build_for_parallel(self, max_workers: int) -> machine.HabermasMachine:
+    return machine.HabermasMachine(
+        question='Q?',
+        statement_client=types.LLMCLient.MOCK.get_client('mock_url'),
+        reward_client=types.LLMCLient.MOCK.get_client('mock_url'),
+        statement_model=types.StatementModel.MOCK.get_model(),
+        reward_model=types.RewardModel.MOCK.get_model(),
+        social_choice_method=types.RankAggregation.SCHULZE.get_method(
+            tie_breaking_method=sc_utils.TieBreakingMethod.TIES_ALLOWED
+        ),
+        num_candidates=4,
+        num_citizens=3,
+        seed=42,
+        max_workers=max_workers,
+    )
+
+  def test_parallel_rankings_match_serial(self):
+    """max_workers > 1 must produce identical output for a given seed."""
+    opinions = ['o1', 'o2', 'o3']
+    critiques = ['c1', 'c2', 'c3']
+
+    serial = self._build_for_parallel(max_workers=1)
+    w_s1, c_s1 = serial.mediate(opinions)
+    w_s2, c_s2 = serial.mediate(critiques)
+
+    parallel = self._build_for_parallel(max_workers=3)
+    w_p1, c_p1 = parallel.mediate(opinions)
+    w_p2, c_p2 = parallel.mediate(critiques)
+
+    self.assertEqual(w_s1, w_p1)
+    self.assertSequenceEqual(c_s1, c_p1)
+    self.assertEqual(w_s2, w_p2)
+    self.assertSequenceEqual(c_s2, c_p2)
+
+  def test_invalid_max_workers(self):
+    with self.assertRaises(ValueError):
+      self._build_for_parallel(max_workers=0)
+
 
 if __name__ == '__main__':
   absltest.main()

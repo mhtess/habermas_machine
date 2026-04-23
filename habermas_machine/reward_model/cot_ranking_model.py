@@ -60,7 +60,7 @@ class COTRankingModel(base_model.BaseRankingModel):
     ranking_result = base_model.RankingResult(None, None)  # Dummy result.
     for _ in range(num_retries_on_error + 1):
       response = llm_client.sample_text(
-          prompt, terminators=['</answer>'], seed=seed)
+          prompt, terminators=[], seed=seed, max_tokens=8192)
       ranking_result = _process_model_response(response, len(statements))
 
       if (
@@ -88,46 +88,23 @@ def _generate_opinion_critique_prompt(
     critique: str,
 ) -> str:
   """Generates a prompt for the LLM using opinion and critique."""
-  prompt = f"""As an AI assistant, your job is to rank these statements in the order that the participant would most likely agree with them, based on their opinion and critique to a summary statement from a previous discussion round. Use Arrow notation for the ranking, where ">" means "preferred to". Ties are NOT allowed and items should be in descending order of preference so you can ONLY use ">" and the letters of the statements in the ranking. Examples of valid rankings: B > A, D > A > C > B. B > C > A > E > D.
+  prompt = f"""As an AI assistant, your job is to rank these statements in the order that the participant would most likely agree with them, based on their opinion and critique to a summary statement from a previous discussion round. Use Arrow notation for the ranking, where ">" means "preferred to". Ties are NOT allowed and items should be in descending order of preference so you can ONLY use ">" and the letters of the statements in the ranking. Examples of valid rankings: B > A, D > A > C > B, B > C > A > E > D.
 
-Please think through this task step-by-step:
+You MUST provide your answer in the following format. Output the Final Ranking FIRST, then the Reasoning:
 
-1. Analyze the participant's opinion and critique, noting key points and sentiments.
-2. Analyze the critique to the summary statement from the previous discussion round.
-3. Compare each statement to the participant's opinion and critique, considering how well it aligns with or supports their view.
-4. Consider any nuances or implications in the statements that might appeal to or repel the participant based on their expressed opinion.
-5. Rank the statements accordingly using only ">" and the letters of the statements.
+## Final Ranking:
+[ranking using arrow notation ONLY - just the letters and > symbols, nothing else]
 
-Provide your answer in the following format:
-<answer>
-[Your step-by-step reasoning and explanation for the ranking]
-<sep>
-[Final ranking using arrow notation]
-</answer>
+## Reasoning:
+[Brief explanation - one sentence per statement is sufficient]
 
-For example for five statements A, B, C, D and E a valid response could be:
-<answer>
-1. The participant's opinion emphasizes the importance of environmental protection and the need for immediate action to address climate change. The critique of the previous winner highlights that it failed to offer specific solutions.
+For example, for five statements A, B, C, D and E:
 
-2. The critique emphasizes the need for concrete solutions to address climate change, indicating that the participant values action-oriented approaches.
-
-3. - Statement A directly addresses the urgency of climate action and proposes concrete steps, aligning with both the participant's opinion and critique.
-  - Statements B and D acknowledge the seriousness of climate change but offer less concrete solutions. B focuses on global cooperation, while D emphasizes economic considerations.
-  - Statement C downplays the urgency of climate change, contradicting the participant's stance.
-  - Statement E completely opposes the participant's view by denying the existence of climate change.
-
-4.  The participant's emphasis on immediate action suggests a preference for proactive solutions and a dislike for approaches that downplay the issue or offer only abstract ideas.
-
-5. Based on this analysis, the ranking is: A > D > B > C > E
-
-<sep>
+## Final Ranking:
 A > D > B > C > E
-</answer>
 
-It is important to follow the template EXACTLY. So ALWAYS start with <answer>, then the explanation, then <sep> then only the final ranking and then </answer>.
-
-
-Below you will find the question, the participant's opinion, the statement from the previous round, and a critique of that statement. You will also find a list of statements to rank.
+## Reasoning:
+A aligns most closely with the participant's emphasis on immediate climate action and addresses the critique's call for concrete solutions. D and B acknowledge the issue but offer less concrete solutions. C downplays urgency. E opposes the participant's view entirely.
 
 Question: {question}
 
@@ -158,44 +135,23 @@ def _generate_opinion_only_prompt(
     statements: Sequence[str],
 ) -> str:
   """Generates a prompt for the LLM using only the opinion."""
-  prompt = f"""
-Task: As an AI assistant, your job is to rank these statements in the order that the participant would most likely agree with them, based on their opinion. Use Arrow notation for the ranking, where ">" means "preferred to". Ties are NOT allowed and items should be in descending order of preference so you can ONLY use ">" and the letters of the statements in the final ranking. Examples of valid final rankings: B > A, D > A > C > D. B > C > A > E > D.
+  prompt = f"""As an AI assistant, your job is to rank these statements in the order that the participant would most likely agree with them, based on their opinion. Use Arrow notation for the ranking, where ">" means "preferred to". Ties are NOT allowed and items should be in descending order of preference so you can ONLY use ">" and the letters of the statements in the ranking. Examples of valid rankings: B > A, D > A > C > B, B > C > A > E > D.
 
-Please think through this task step-by-step:
+You MUST provide your answer in the following format. Output the Final Ranking FIRST, then the Reasoning:
 
-1. Analyze the participant's opinion, noting key points and sentiments.
-2. Compare each statement to the participant's opinion, considering how well it aligns with or supports their view.
-3. Consider any nuances or implications in the statements that might appeal to or repel the participant based on their expressed opinion.
-4. Rank the statements accordingly using only ">" and the letters of the statements.
+## Final Ranking:
+[ranking using arrow notation ONLY - just the letters and > symbols, nothing else]
 
-Provide your answer in the following format:
-<answer>
-[Your step-by-step reasoning and explanation for the ranking]
-<sep>
-[Final ranking using arrow notation]
-</answer>
+## Reasoning:
+[Brief explanation - one sentence per statement is sufficient]
 
-For example for five statements A, B, C, D and E a valid response could be:
-<answer>
-1. The participant's opinion emphasizes the importance of environmental protection and the need for immediate action to address climate change.
+For example, for five statements A, B, C, D and E:
 
-2. - Statement A directly addresses the urgency of climate action and proposes concrete steps, aligning with the participant's opinion.
-   - Statements B and D acknowledge the seriousness of climate change but offer less concrete solutions. B focuses on global cooperation, while D emphasizes economic considerations.
-   - Statement C downplays the urgency of climate change, contradicting the participant's stance.
-   - Statement E completely opposes the participant's view by denying the existence of climate change.
-
-3.  The participant's emphasis on immediate action suggests a preference for proactive solutions and a dislike for approaches that downplay the issue or offer only abstract ideas.
-
-4. Based on this analysis, the ranking is: A > D > B > C > E
-
-<sep>
+## Final Ranking:
 A > D > B > C > E
-</answer>
 
-It is important to follow the template EXACTLY. So ALWAYS start with <answer>, then the explanation, then <sep> then only the final ranking and then </answer>.
-
-
-Below you will find the question and the participant's opinion. You will also find a list of statements to rank.
+## Reasoning:
+A aligns most closely with the participant's emphasis on immediate climate action. D and B acknowledge the issue but offer less concrete solutions. C downplays urgency. E opposes the participant's view entirely.
 
 Question: {question}
 
@@ -335,7 +291,18 @@ def _process_model_response(
     response format is incorrect, or "INCORRECT_ARROW_RANKING" if the arrow
     ranking is incorrect.
   """
-  if _check_response_format(response):
+  # Try markdown format: Final Ranking first, then Reasoning
+  ranking_first_match = re.search(r'##\s*Final Ranking:\s*(.*?)##\s*Reasoning:\s*(.*?)$', response, re.DOTALL | re.IGNORECASE)
+  # Also try old order: Reasoning first, then Final Ranking
+  reasoning_first_match = re.search(r'##\s*Reasoning:\s*(.*?)##\s*Final Ranking:\s*(.*?)(?:\n|$)', response, re.DOTALL | re.IGNORECASE)
+  if ranking_first_match:
+    arrow_ranking = _extract_arrow_ranking(ranking_first_match.group(1).strip())
+    explanation = ranking_first_match.group(2).strip()
+  elif reasoning_first_match:
+    explanation = reasoning_first_match.group(1).strip()
+    arrow_ranking = _extract_arrow_ranking(reasoning_first_match.group(2).strip())
+  # Fall back to old XML-like format for backward compatibility
+  elif _check_response_format(response):
     match = re.search(
         r'<answer>\s*(.*?)\s*<sep>\s*(.*?)\s*</answer>', response, re.DOTALL
     )
@@ -346,7 +313,7 @@ def _process_model_response(
       arrow_ranking = _extract_arrow_ranking(
           match.group(2).strip())
   else:
-    # Backup as it sometimes returns "final ranking:" in a different format.
+    # Backup: look for "final ranking:" anywhere in response
     match = re.search(r'(?i)final ranking:\s*(.*)', response)
     if match is None:
       return base_model.RankingResult(None, f'INCORRECT_TEMPLATE: {response}')

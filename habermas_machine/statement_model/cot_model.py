@@ -31,34 +31,48 @@ def _generate_opinion_critique_prompt(
 ) -> str:
   """Generates a prompt using opinions, previous winner, and critiques."""
 
-  prompt = f"""You are assisting a citizens' jury in forming a consensus opinion on an important question. The jury members have provided their individual opinions, a first draft of a consensus statement was created, and critiques of that draft were gathered. Your role is to generate a revised consensus statement that incorporates the feedback and aims to better represent the collective view of the jury.  Ensure the revised statement does not conflict with the individual opinions.
+  prompt = f"""You are assisting a group of citizens in a deliberation process. A first draft of a group consensus statement was created, and the participants have now provided critiques of that draft. Your role is to generate a revised consensus statement that incorporates the critiques while preserving what worked well in the original.
+
+IMPORTANT GUIDELINES FOR THE REVISED STATEMENT:
+- Make targeted revisions to address the critiques. Do NOT rewrite the entire statement from scratch. Keep the parts that worked well and add or modify specific parts based on the critiques.
+- Write in the first-person plural as the voice of the group: "We believe...", "We feel...", "We have come to the conclusion that..."
+- The statement should read as a natural group opinion, not an academic analysis.
+- Do NOT include any references to opinion numbers, participant numbers, or critique numbers in the final statement. These references belong only in the reasoning section.
+- Acknowledge the majority view while also incorporating minority perspectives where possible.
+- Be substantive and specific — include concrete positions or proposals, not vague hedging like "further investigation is needed."
+- Aim for 100-200 words — a substantial paragraph that captures the group's nuanced position.
+- If a critique is sarcastic, off-topic, or not constructive, do not incorporate it into the revision.
 
 Please think through this task step-by-step:
 
-1. Carefully analyze the individual opinions, noting key themes, points of agreement, and areas of disagreement.
-2. Review the previous draft consensus statement and identify its strengths and weaknesses.
-3. Analyze the critiques of the previous draft, paying attention to specific suggestions and concerns raised by the jury members.
-4. Based on the opinions, the previous draft, and the critiques, synthesize a revised consensus statement that addresses the concerns raised and better reflects the collective view of the jury. Ensure the statement is clear, concise, addresses the core issue posed in the question, and *does not conflict* with any of the individual opinions.  Refer to specific opinion and critique numbers when making your revisions.
+1. Carefully review the previous draft consensus statement and identify its strengths.
+2. Analyze the critiques, noting specific suggestions, concerns, and areas of agreement or disagreement with the draft.
+3. Determine which critiques represent substantive suggestions that should be incorporated, and which (if any) are not constructive.
+4. Generate a revised statement that keeps the strong parts of the original draft and makes targeted additions or modifications to address the substantive critiques.
 
 Provide your answer in the following format:
-<answer>
-[Your step-by-step reasoning and explanation for the revised statement]
-<sep>
-[Revised consensus statement]
-</answer>
+
+## Reasoning:
+[Your step-by-step reasoning, referencing specific opinion and critique numbers]
+
+## Revised Consensus Statement:
+[The revised consensus statement ONLY — written as the group's voice, with NO references to opinion or critique numbers]
 
 Example:
-<answer>
-1. Opinions generally agree on the need for more green spaces (Opinions 1, 2, 3), but disagree on the specific location (Opinions 2 and 3 prefer the riverfront) and funding (Opinion 1 suggests a tax levy, Opinion 3 suggests private donations).
-2. The previous draft suggested converting the old factory site into a park, but didn't address funding, which was a key concern in Critique 1.
-3. Critiques highlighted the lack of funding details (Critique 1) and some preferred a different location (Critique 2 suggested the riverfront, echoing Opinion 2).
-4. The revised statement proposes converting the old factory site into a park, funded by a combination of city funds and private donations (addressing Opinion 3 and Critique 1), and includes a plan for community input on park design and amenities. The factory site is chosen as a compromise location, as it avoids the higher costs associated with the riverfront development suggested in Opinion 2 and Critique 2.
-<sep>
-We propose converting the old factory site into a park, funded by a combination of city funds and private donations. We will actively seek community input on the park's design and amenities to ensure it meets the needs of our residents.
-</answer>
+
+## Reasoning:
+1. The previous draft effectively captures the group's opposition to raising the retirement age and acknowledges the cost implications.
+2. Critique 1 agrees with the statement and finds it succinct. Critique 2 suggests adding support for pensioners on state pension only. Critique 3 simply restates opposition. Critique 4 questions the relevance of the food legislation point.
+3. Critiques 2's suggestion about pensioner support is substantive and should be added. Critique 4's concern about the food legislation point is valid but was supported in the original opinions, so it should remain but could be softened.
+4. The revised statement keeps the original largely intact and adds one sentence addressing Critique 2's suggestion about pensioner support.
+
+## Revised Consensus Statement:
+In general, the group was opposed to raising the retirement age from 66 to 68 years. However, we recognised that people are living longer and this has implications for the cost of the state pension. We also recognised that many people are in poor health in later life and this can be due to poverty and lifestyle. We believe that the government should support people to stay healthy in later life through health advice and legislation on food producers. We believe that people should have the choice to retire at 66 or to continue to work if they wish to do so. We also believe that the government should consider more support for pensioners who have only the state pension to live on.
+
+It is CRITICAL to follow this format. Always include the "## Reasoning:" section followed by your explanation, then the "## Revised Consensus Statement:" section with ONLY the statement. The final statement must NOT contain any references like "(Opinion 1)" or "(Critique 2)".
 
 
-Below you will find the question, the individual opinions, the previous draft consensus statement, and the critiques provided by the jury members.
+Below you will find the question, the individual opinions, the previous draft consensus statement, and the critiques provided by the participants.
 
 
 Question: {question}
@@ -85,31 +99,45 @@ def _generate_opinion_only_prompt(
     opinions: Sequence[str],
 ) -> str:
   """Generates a prompt for the LLM using only the opinions."""
-  prompt = f"""
-You are assisting a citizens' jury in forming an initial consensus opinion on an important question. The jury members have provided their individual opinions. Your role is to generate a draft consensus statement that captures the main points of agreement and represents the collective view of the jury.  The draft statement must not conflict with any of the individual opinions.
+  prompt = f"""You are assisting a group of citizens in a deliberation process. The participants have provided their individual opinions on an important question. Your role is to generate a draft consensus statement that captures the main points of agreement and represents the collective view of the group.
+
+IMPORTANT GUIDELINES FOR THE CONSENSUS STATEMENT:
+- Write in the first-person plural as the voice of the group: "We believe...", "We feel...", "In general, the group..."
+- The statement should read as a natural group opinion, not an academic analysis.
+- Do NOT include any references to opinion numbers or participant numbers in the final statement. These references belong only in the reasoning section.
+- Acknowledge the majority view while also incorporating minority perspectives where possible. Use phrases like "However, we recognised that..." or "We also acknowledged that..." to show nuance.
+- Be substantive and specific — include concrete positions or proposals, not vague hedging like "further investigation is needed."
+- Aim for 100-200 words — a substantial paragraph that captures the group's nuanced position.
+- The statement must not directly contradict any individual opinion.
 
 Please think through this task step-by-step:
 
 1. Carefully analyze the individual opinions, noting key themes, points of agreement, and areas of disagreement.
-2. Based on the analysis, synthesize a concise and clear consensus statement that represents the shared perspective of the jury members.  Address the core issue posed in the question, and ensure the statement *does not conflict* with any of the individual opinions.  Refer to specific opinion numbers to demonstrate how the draft reflects the collective view.
+2. Identify the majority position and any significant minority perspectives that should be acknowledged.
+3. Synthesize a consensus statement that represents the shared perspective while acknowledging where views differ.
 
 Provide your answer in the following format:
-<answer>
-[Your step-by-step reasoning and explanation for the statement]
-<sep>
-[Draft consensus statement]
-</answer>
+
+## Reasoning:
+[Your step-by-step reasoning, referencing specific opinion numbers]
+
+## Draft Consensus Statement:
+[The draft consensus statement ONLY — written as the group's voice, with NO references to opinion numbers]
 
 Example:
-<answer>
-1. Most opinions emphasize the importance of public transportation (Opinions 1, 3, 4) and reducing car dependency (Opinions 2, 4). Some also mention cycling and walking as important additions (Opinions 2, 3).
-2. The draft statement prioritizes investment in public transport and encourages cycling and walking, reflecting the shared views expressed in the majority of opinions.
-<sep>
-We believe that investing in public transport, along with promoting cycling and walking, are crucial steps towards creating a more sustainable and livable city.
-</answer>
+
+## Reasoning:
+1. Opinions 1, 2, and 4 support raising the retirement age, citing longer life expectancy and pension costs (majority view). Opinion 3 is neutral, acknowledging both sides.
+2. Opinion 2 uniquely emphasizes the need for support for those in poor health who cannot work until 68 — this represents an important caveat.
+3. The consensus should reflect the majority support for raising the age while acknowledging the health concerns raised in Opinion 2.
+
+## Draft Consensus Statement:
+We should raise the retirement age from 66 to 68. People are living longer, and we should expect them to work longer. This will also reduce the burden on the state to fund pensions. However, we recognised that many people are in poor health in later life and this can be due to poverty and lifestyle. We believe that the government should support people to stay healthy in later life and provide assistance for those unable to work until 68.
+
+It is CRITICAL to follow this format. Always include the "## Reasoning:" section followed by your explanation, then the "## Draft Consensus Statement:" section with ONLY the statement. The final statement must NOT contain any references like "(Opinion 1)" or "(Opinions 2, 3)".
 
 
-Below you will find the question and the individual opinions of the jury members.
+Below you will find the question and the individual opinions of the participants.
 
 Question: {question}
 
@@ -147,6 +175,18 @@ def _process_model_response(response: str) -> tuple[str, str]:
       A tuple of (statement, explanation).  If the response format is
       incorrect, returns ("", "INCORRECT_TEMPLATE").
   """
+  # Try new markdown format first (either "Draft" or "Revised" Consensus Statement)
+  match = re.search(
+      r'##\s*Reasoning:\s*(.*?)##\s*(?:Draft|Revised)\s+Consensus Statement:\s*(.*?)(?:\n##|$)',
+      response,
+      re.DOTALL | re.IGNORECASE
+  )
+  if match:
+    explanation = match.group(1).strip()
+    statement = match.group(2).strip()
+    return statement, explanation
+
+  # Fall back to old XML-like format for backward compatibility
   match = re.search(
       r'<answer>\s*(.*?)\s*<sep>\s*(.*?)\s*</answer>', response, re.DOTALL
   )
@@ -154,8 +194,8 @@ def _process_model_response(response: str) -> tuple[str, str]:
     explanation = match.group(1).strip()
     statement = match.group(2).strip()
     return statement, explanation
-  else:
-    return '', 'INCORRECT_TEMPLATE'
+
+  return '', 'INCORRECT_TEMPLATE'
 
 
 class COTModel(base_model.BaseStatementModel):
@@ -182,7 +222,7 @@ class COTModel(base_model.BaseStatementModel):
     statement, explanation = '', ''  # Dummy result.
     for _ in range(num_retries_on_error):
       response = llm_client.sample_text(
-          prompt, terminators=['</answer>'], seed=seed)
+          prompt, terminators=[], seed=seed)
 
       statement, explanation = _process_model_response(response)
       if len(statement) > 5 and 'INCORRECT' not in explanation:
