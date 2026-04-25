@@ -58,11 +58,31 @@ with st.sidebar:
         import os
         os.environ['GOOGLE_API_KEY'] = api_key
 
-    # Model selection
+    # Model selection. We curate the dropdown order so that long-context,
+    # higher-quality "pro" variants surface first — at scale (50+ participants
+    # with multi-paragraph opinions) the prompt routinely runs to 100K+ tokens
+    # and the lite variant's reasoning quality degrades noticeably.
+    _preferred_order = (
+        'gemini-pro-latest',
+        'gemini-2.5-pro',
+        'gemini-flash-latest',
+        'gemini-2.5-flash',
+        'gemini-3-pro-preview',
+        'gemini-3-flash-preview',
+        'gemini-2.5-flash-lite',
+    )
+    _supported = set(aistudio_client.SUPPORTED_MODELS)
+    _model_options = [m for m in _preferred_order if m in _supported]
+    _model_options += [m for m in aistudio_client.SUPPORTED_MODELS
+                       if m not in _model_options]
     model_name = st.selectbox(
         "Gemini Model",
-        options=list(aistudio_client.SUPPORTED_MODELS),
-        help="Recommended: gemini-flash-latest for best compatibility"
+        options=_model_options,
+        help=(
+            "All listed models support >=1M-token context. "
+            "For small groups (<20), gemini-flash-latest is fastest. "
+            "For larger groups or long opinions, prefer gemini-pro-latest."
+        ),
     )
 
     # Number of candidates
@@ -81,6 +101,23 @@ with st.sidebar:
         max_value=10,
         value=5,
         help="How many times to retry if the model returns an incorrect format"
+    )
+
+    # Concurrent LLM call cap. Per-citizen ranking calls are independent and
+    # I/O-bound, so parallelism is a big win — but spawning one thread per
+    # citizen at 100+ participants will saturate the API's RPM quota and
+    # trigger 429s. 16 is a safe default for paid Gemini quotas; bump up if
+    # your quota allows.
+    max_concurrent = st.slider(
+        "Max concurrent LLM calls",
+        min_value=1,
+        max_value=64,
+        value=16,
+        help=(
+            "Caps simultaneous ranking calls to the Gemini API. "
+            "Higher = faster, but increases the chance of hitting "
+            "rate limits (transient errors are retried automatically)."
+        ),
     )
 
     st.divider()
@@ -226,9 +263,14 @@ with col2:
     num_participants = st.number_input(
         "Number of Participants",
         min_value=2,
-        max_value=20,
+        max_value=200,
         value=len(st.session_state.opinions),
-        help="Adjust to add or remove opinion boxes"
+        help=(
+            "Adjust to add or remove opinion boxes. "
+            "For >40 participants, use a long-context model "
+            "(e.g. gemini-2.5-pro / gemini-pro-latest) and expect "
+            "deliberation to take several minutes."
+        ),
     )
 
 # Adjust opinions list based on participant count
@@ -237,18 +279,48 @@ if num_participants > len(st.session_state.opinions):
 elif num_participants < len(st.session_state.opinions):
     st.session_state.opinions = st.session_state.opinions[:num_participants]
 
-# Opinion input fields
+# Opinion input fields. We paginate above ~25 participants so Streamlit
+# doesn't have to re-render hundreds of text areas on every interaction —
+# session_state persists widget values for all participants regardless of
+# which page is currently visible.
+OPINION_PAGE_SIZE = 25
+
+# Seed widget state for every participant so unrendered pages keep their data.
 for i in range(num_participants):
-    # Initialize widget key from opinions list if not already set
     if f"opinion_{i}" not in st.session_state:
         st.session_state[f"opinion_{i}"] = st.session_state.opinions[i]
-    st.text_area(
-        f"Participant {i+1}",
-        height=120,
-        key=f"opinion_{i}"
+
+if num_participants > OPINION_PAGE_SIZE:
+    num_pages = (num_participants - 1) // OPINION_PAGE_SIZE + 1
+    page = st.number_input(
+        f"Page (showing {OPINION_PAGE_SIZE} participants per page)",
+        min_value=1,
+        max_value=num_pages,
+        value=1,
+        key="opinion_page",
     )
-    # Sync widget value back to opinions list
-    st.session_state.opinions[i] = st.session_state[f"opinion_{i}"]
+    start_idx = (page - 1) * OPINION_PAGE_SIZE
+    end_idx = min(start_idx + OPINION_PAGE_SIZE, num_participants)
+    st.caption(
+        f"Showing participants {start_idx + 1}–{end_idx} "
+        f"of {num_participants}"
+    )
+else:
+    start_idx, end_idx = 0, num_participants
+
+for i in range(start_idx, end_idx):
+    st.text_area(
+        f"Participant {i + 1}",
+        height=120,
+        key=f"opinion_{i}",
+    )
+
+# Sync widget state back to the opinions list for ALL participants — not
+# just the visible page — so the canonical list stays in sync as the user
+# pages through.
+for i in range(num_participants):
+    if f"opinion_{i}" in st.session_state:
+        st.session_state.opinions[i] = st.session_state[f"opinion_{i}"]
 
 st.divider()
 
@@ -287,7 +359,7 @@ if st.button("🚀 Run Opinion Round", type="primary", use_container_width=True)
                 num_citizens=len(valid_opinions),
                 verbose=True,  # Enable logging to terminal
                 num_retries_on_error=num_retries,
-                max_workers=len(valid_opinions),
+                max_workers=min(max_concurrent, len(valid_opinions)),
             )
 
             print("\n" + "="*80)
@@ -444,17 +516,54 @@ if st.session_state.winner:
                         - Check that the column letter is correct
                         """)
 
-    # Critique inputs
-    # Determine number of critiques based on opinions
-    num_critique_boxes = len([op for op in st.session_state.opinions if op.strip()])
+    # Critique inputs. Number of critique boxes mirrors the number of
+    # non-empty opinions; paginate the same way as the opinion section.
+    num_critique_boxes = len(
+        [op for op in st.session_state.opinions if op.strip()]
+    )
 
-    for i in range(num_critique_boxes):
-        st.session_state.critiques[i] = st.text_area(
-            f"Critique from Participant {i+1}",
-            value=st.session_state.critiques[i],
-            height=80,
-            key=f"critique_{i}"
+    # Make sure the critiques list is long enough.
+    if len(st.session_state.critiques) < num_critique_boxes:
+        st.session_state.critiques.extend(
+            [""] * (num_critique_boxes - len(st.session_state.critiques))
         )
+
+    CRITIQUE_PAGE_SIZE = 25
+
+    # Seed widget state so off-page critiques are preserved.
+    for i in range(num_critique_boxes):
+        if f"critique_{i}" not in st.session_state:
+            st.session_state[f"critique_{i}"] = st.session_state.critiques[i]
+
+    if num_critique_boxes > CRITIQUE_PAGE_SIZE:
+        c_num_pages = (num_critique_boxes - 1) // CRITIQUE_PAGE_SIZE + 1
+        c_page = st.number_input(
+            f"Page (showing {CRITIQUE_PAGE_SIZE} critiques per page)",
+            min_value=1,
+            max_value=c_num_pages,
+            value=1,
+            key="critique_page",
+        )
+        c_start = (c_page - 1) * CRITIQUE_PAGE_SIZE
+        c_end = min(c_start + CRITIQUE_PAGE_SIZE, num_critique_boxes)
+        st.caption(
+            f"Showing critiques {c_start + 1}–{c_end} "
+            f"of {num_critique_boxes}"
+        )
+    else:
+        c_start, c_end = 0, num_critique_boxes
+
+    for i in range(c_start, c_end):
+        st.text_area(
+            f"Critique from Participant {i + 1}",
+            height=80,
+            key=f"critique_{i}",
+        )
+
+    # Sync widget state back into the critiques list for every participant.
+    for i in range(num_critique_boxes):
+        if f"critique_{i}" in st.session_state:
+            st.session_state.critiques[i] = st.session_state[f"critique_{i}"]
 
     # Run critique round
     if st.button("🔄 Run Critique Round", type="secondary", use_container_width=True):
