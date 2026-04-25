@@ -972,27 +972,27 @@ if st.session_state.winner:
             st.markdown("### 🏆 Refined Consensus Statement")
             st.success(winner)
 
-                # Same drop warning as the opinion round.
-                dropped = hm.last_round_dropped_citizens
-                if dropped:
-                    st.warning(
-                        f"⚠️ {len(dropped)} of {len(valid_critiques)} "
-                        "participants were dropped from ranking aggregation "
-                        "because the reward model couldn't return a complete "
-                        f"ranking after retries (citizens {dropped}). The "
-                        "refined statement above reflects the remaining "
-                        f"{len(valid_critiques) - len(dropped)} participants."
-                    )
+            # Same drop warning as the opinion round.
+            dropped = hm.last_round_dropped_citizens
+            if dropped:
+                st.warning(
+                    f"⚠️ {len(dropped)} of {len(valid_critiques)} "
+                    "participants were dropped from ranking aggregation "
+                    "because the reward model couldn't return a complete "
+                    f"ranking after retries (citizens {dropped}). The "
+                    "refined statement above reflects the remaining "
+                    f"{len(valid_critiques) - len(dropped)} participants."
+                )
 
-                if hm.last_round_dropped_candidates:
-                    st.warning(
-                        f"⚠️ {hm.last_round_dropped_candidates} of "
-                        f"{num_candidates} refined statements came back "
-                        "empty or unparseable from the statement model "
-                        "and were dropped before ranking. If this happens "
-                        "repeatedly, try fewer candidates, a shorter "
-                        "context, or a more capable model."
-                    )
+            if hm.last_round_dropped_candidates:
+                st.warning(
+                    f"⚠️ {hm.last_round_dropped_candidates} of "
+                    f"{num_candidates} refined statements came back "
+                    "empty or unparseable from the statement model "
+                    "and were dropped before ranking. If this happens "
+                    "repeatedly, try fewer candidates, a shorter "
+                    "context, or a more capable model."
+                )
 
             with st.expander("📋 View All Refined Statements (Ranked)"):
                 for i, stmt in enumerate(sorted_statements, 1):
