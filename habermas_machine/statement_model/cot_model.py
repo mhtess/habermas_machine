@@ -120,6 +120,7 @@ Critiques of the Previous Draft:
   for i, critique in enumerate(critiques):
     prompt += f'Critique Person {i+1}: {critique}\n'
 
+  prompt += _final_format_reminder(is_critique_round=True)
   return prompt.strip()
 
 
@@ -218,7 +219,42 @@ Individual Opinions:
   for i, opinion in enumerate(opinions):
     prompt += f'Opinion Person {i+1}: {opinion}\n'
 
+  prompt += _final_format_reminder(is_critique_round=False)
   return prompt.strip()
+
+
+def _final_format_reminder(is_critique_round: bool) -> str:
+  """Hard-stop format reminder appended after the opinions/critiques.
+
+  Weaker models (notably gemini-2.5-flash-lite) lose track of the format
+  spec when it sits ~150K tokens away from where they actually generate.
+  This block sits right after the opinion/critique list — i.e. right
+  before generation begins — so the format requirements are the most
+  recent thing the model has seen. Empirically this is the single biggest
+  driver of parser-success rate at scale.
+  """
+  statement_header = (
+      'Revised Consensus Statement' if is_critique_round
+      else 'Draft Consensus Statement'
+  )
+  return f"""
+
+================================================================================
+NOW PRODUCE YOUR OUTPUT. Use this format EXACTLY — both headers are MANDATORY:
+
+## Reasoning:
+[Your step-by-step reasoning here. Reference specific opinion numbers
+{'and critique numbers ' if is_critique_round else ''}where helpful.]
+
+## {statement_header}:
+[The consensus statement only. Written as the group's voice in first person
+plural ("We believe..."). NO references to opinion or critique numbers.]
+
+START YOUR RESPONSE WITH "## Reasoning:" — do not preface, do not summarise,
+do not output anything before that header. Both headers MUST appear, each on
+its own line, exactly as shown above (with the colon, with the "##").
+================================================================================
+"""
 
 
 def _length_instruction(target_word_count: int | None) -> str:

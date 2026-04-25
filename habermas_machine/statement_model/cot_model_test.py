@@ -158,6 +158,31 @@ class COTModelTest(parameterized.TestCase):
     self.assertNotEmpty(explanation)
     self.assertNotIn("INCORRECT", explanation)
 
+  @parameterized.named_parameters(
+      ("opinion_only", None, None, "Draft Consensus Statement"),
+      ("with_critique", "Previous winner.", ["c1", "c2"],
+       "Revised Consensus Statement"),
+  )
+  def test_final_format_reminder_appended_after_inputs(
+      self, previous_winner, critiques, expected_header
+  ):
+    """The format reminder must appear AFTER the opinions/critiques."""
+    prompt = cot_model._generate_prompt(
+        "Q?", ["op1", "op2"], previous_winner, critiques
+    )
+    # Reminder block is present.
+    self.assertIn("NOW PRODUCE YOUR OUTPUT", prompt)
+    self.assertIn(f"## {expected_header}:", prompt)
+    self.assertIn('START YOUR RESPONSE WITH "## Reasoning:"', prompt)
+    # And it really is at the end, after the inputs — the reminder
+    # block must come strictly after the last opinion/critique line.
+    last_input_marker = (
+        prompt.rfind("Critique Person 2:") if critiques
+        else prompt.rfind("Opinion Person 2:")
+    )
+    reminder_position = prompt.find("NOW PRODUCE YOUR OUTPUT")
+    self.assertGreater(reminder_position, last_input_marker)
+
   def test_process_model_response_rejects_empty_statement(self):
     """A header with no content under it must NOT pass as a valid statement."""
     response = (
