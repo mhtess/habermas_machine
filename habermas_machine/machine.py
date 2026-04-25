@@ -69,6 +69,7 @@ class HabermasMachine:
       verbose: bool = False,
       num_retries_on_error: int | None = 8,
       max_workers: int = 1,
+      target_word_count: int | None = None,
   ):
     """Initializes the Habermas Machine.
 
@@ -77,6 +78,11 @@ class HabermasMachine:
         the original serial behavior. Higher values issue rankings in parallel
         via a thread pool (LLM calls are I/O-bound, so threads work well).
         The effective pool size is min(max_workers, num_citizens).
+      target_word_count: If set, instructs the statement model to aim for
+        this many words in each candidate consensus statement. Used to make
+        long deliberations produce long-form summaries that match the depth
+        of the input opinions. If None, the model's default length guidance
+        applies (typically a single substantial paragraph).
     """
     self._question = question  # Question to be answered.
     self._round = 0  # Current round (round 0 is the opinion round).
@@ -102,17 +108,57 @@ class HabermasMachine:
     if max_workers < 1:
       raise ValueError(f'max_workers must be >= 1, got {max_workers}.')
     self._max_workers = max_workers
+    self._target_word_count = target_word_count
+    # Citizens whose ranking call failed (after retries) in the most recent
+    # mediate() call — exposed via the property below so callers can warn.
+    self._last_round_dropped_citizens: list[int] = []
+    # Number of candidate statements that came back empty/unparseable in
+    # the most recent _generate_statements() call. Surfaced to the UI so
+    # users can tell when generation is degrading even if the run finishes.
+    self._last_round_dropped_candidates: int = 0
 
   def _get_new_seed(self):
     """Generates a new random seed."""
     return self._rng.integers(np.iinfo(np.int32).max)
 
+  @property
+  def last_round_dropped_citizens(self) -> list[int]:
+    """1-indexed citizen numbers whose ranking failed in the last round.
+
+    A citizen is "dropped" when the reward model fails to produce a
+    parseable ranking after exhausting retries — typically because the
+    LLM returned a partial ordering (e.g. "A > B" when 4 candidates
+    were expected). Their row is excluded from social-choice aggregation
+    rather than failing the entire round.
+    """
+    return list(self._last_round_dropped_citizens)
+
+  @property
+  def last_round_dropped_candidates(self) -> int:
+    """Number of candidate statements that came back empty in the last round.
+
+    A candidate is "dropped" when the statement model returns an empty or
+    unparseable result after exhausting retries — typically because the
+    LLM produced output that didn't match the expected format. Empty
+    candidates are filtered out before ranking so they don't poison the
+    social-choice aggregation.
+    """
+    return self._last_round_dropped_candidates
+
   def _generate_statements(
       self,
   ) -> tuple[list[str], list[str]]:  # statements, explanations.
-    """Generates candidate statements."""
+    """Generates candidate statements.
+
+    Empty / unparseable candidates (statement model exhausted retries) are
+    dropped here rather than passed downstream — feeding empty strings to
+    the ranker confuses both the LLM and the Schulze aggregation, and an
+    empty winner is the worst possible UX. We require at least 2 valid
+    candidates for ranking; if we get fewer, raise so the caller knows.
+    """
     statements = []
     explanations = []
+    dropped = 0
     for _ in range(self._num_candidates):
       # Shuffle the opinions and critiques to avoid ordering bias.
       indices = self._rng.permutation(self._num_citizens)
@@ -129,9 +175,33 @@ class HabermasMachine:
           critiques=shuffled_critiques,
           seed=self._get_new_seed(),
           num_retries_on_error=self._num_retries_on_error,
+          target_word_count=self._target_word_count,
       )
+      # Drop empty outputs. The retry loop inside generate_statement
+      # already swallows transient parse failures; if we still have nothing
+      # after retries, this candidate is unrecoverable. We use a strict
+      # "non-empty after strip" check rather than a length threshold so
+      # legitimately short answers from custom statement models still pass.
+      if not statement or not statement.strip():
+        dropped += 1
+        if self._verbose:
+          print(
+              f'Dropping empty/short candidate statement '
+              f'(explanation: {explanation!r}).'
+          )
+        continue
       statements.append(statement)
       explanations.append(explanation)
+
+    self._last_round_dropped_candidates = dropped
+
+    if len(statements) < 2:
+      raise ValueError(
+          f'Statement model produced too few valid candidates: '
+          f'{len(statements)} valid out of {self._num_candidates} requested '
+          f'({dropped} dropped as empty/unparseable). Check the statement '
+          f'model prompt or try a different model.'
+      )
     return statements, explanations
 
   def _get_rankings(
@@ -143,10 +213,14 @@ class HabermasMachine:
     (permutation + seed) happen serially before dispatch so outputs are
     deterministic for a given seed regardless of max_workers.
     """
+    # Use the actual statement count, not self._num_candidates — empty
+    # statements are dropped in _generate_statements so the live list may
+    # be shorter than the configured candidate count.
+    num_statements = len(statements)
     # Pre-compute per-citizen inputs serially — keeps RNG draws deterministic.
     tasks = []
     for i in range(self._num_citizens):
-      indices = self._rng.permutation(self._num_candidates)
+      indices = self._rng.permutation(num_statements)
       shuffled_statements = [statements[j] for j in indices]
       seed = self._get_new_seed()
       tasks.append((i, indices, shuffled_statements, seed))
@@ -182,17 +256,47 @@ class HabermasMachine:
         i, ranking, explanation = run_one(task)
         results[i] = (i, ranking, explanation)
 
+    # Salvage: if the reward model exhausted its retries for a given
+    # citizen (typically because the LLM produced a partial ranking like
+    # "A > B" when 4 candidates were expected), drop that citizen from
+    # aggregation rather than failing the entire round. Losing a few rows
+    # out of N is fine for Schulze; losing the run after several minutes
+    # of LLM work is not.
     all_rankings = []
     explanations = []
+    dropped_citizens: list[int] = []
     for i, (_, ranking, explanation) in enumerate(results):
       if ranking is None:
-        raise ValueError(
-            f"Ranking is None for citizen {i+1}. Explanation: {explanation}")
+        dropped_citizens.append(i + 1)  # 1-indexed for user-facing logs.
+        if self._verbose:
+          print(
+              f"Dropping citizen {i + 1} from ranking aggregation — "
+              f"reward model failed after retries. Explanation: "
+              f"{explanation}"
+          )
+        continue
       indices = tasks[i][1]
       unshuffled_ranking = np.full_like(ranking, fill_value=types.RANKING_MOCK)
       unshuffled_ranking[indices] = ranking
       all_rankings.append(unshuffled_ranking)
       explanations.append(explanation)
+
+    # Stash for the public property so the UI can warn the user.
+    self._last_round_dropped_citizens = dropped_citizens
+
+    # If too few rankings remain to aggregate meaningfully, fail loudly.
+    # Threshold: at least 2 rankings (the social-choice minimum) AND a
+    # strict majority of the original citizens — anything less and the
+    # result isn't representative of the group.
+    min_required = max(2, (self._num_citizens + 1) // 2)
+    if len(all_rankings) < min_required:
+      raise ValueError(
+          f"Too many citizens failed to produce valid rankings: "
+          f"{len(dropped_citizens)} of {self._num_citizens} dropped "
+          f"(need at least {min_required} valid). Check the reward-model "
+          f"prompt or try a different model."
+      )
+
     return np.array(all_rankings), explanations
 
   def overwrite_previous_winner(self, winner: str):

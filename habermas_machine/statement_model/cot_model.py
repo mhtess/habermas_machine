@@ -92,6 +92,14 @@ In general, free childcare is a good thing, but it is important to consider how 
 
 It is CRITICAL to follow this format. Always include the "## Reasoning:" section followed by your explanation, then the "## Revised Consensus Statement:" section with ONLY the statement. The final statement must NOT contain any references like "(Opinion 1)" or "(Critique 2)".
 
+================================================================================
+END OF FORMAT EXAMPLES. The example above (childcare) is for FORMAT REFERENCE
+ONLY — do NOT copy phrases, topics, specific details, or any content from it.
+Your statement MUST address the actual question below using the actual opinions
+and critiques provided. If you find yourself echoing words like "childcare",
+"parental leave", "6 months", or "irrespective of gender", you are copying
+the example — STOP and rewrite from scratch using the actual inputs below.
+================================================================================
 
 Below you will find the question, the individual opinions, the previous draft consensus statement, and the critiques provided by the participants.
 
@@ -112,6 +120,7 @@ Critiques of the Previous Draft:
   for i, critique in enumerate(critiques):
     prompt += f'Critique Person {i+1}: {critique}\n'
 
+  prompt += _final_format_reminder(is_critique_round=True)
   return prompt.strip()
 
 
@@ -191,6 +200,14 @@ The government should spend more on improving the rail network. This is to encou
 
 It is CRITICAL to follow this format. Always include the "## Reasoning:" section followed by your explanation, then the "## Draft Consensus Statement:" section with ONLY the statement. The final statement must NOT contain any references like "(Opinion 1)" or "(Opinions 2, 3)".
 
+================================================================================
+END OF FORMAT EXAMPLES. The examples above (childcare, rail) are for FORMAT
+REFERENCE ONLY — do NOT copy phrases, topics, specific details, or any content
+from them. Your statement MUST address the actual question below using the
+actual opinions provided. If you find yourself echoing words like "childcare",
+"parental leave", "6 months", "rail network", or "HS2", you are copying the
+example — STOP and rewrite from scratch using the actual inputs below.
+================================================================================
 
 Below you will find the question and the individual opinions of the participants.
 
@@ -202,7 +219,68 @@ Individual Opinions:
   for i, opinion in enumerate(opinions):
     prompt += f'Opinion Person {i+1}: {opinion}\n'
 
+  prompt += _final_format_reminder(is_critique_round=False)
   return prompt.strip()
+
+
+def _final_format_reminder(is_critique_round: bool) -> str:
+  """Hard-stop format reminder appended after the opinions/critiques.
+
+  Weaker models (notably gemini-2.5-flash-lite) lose track of the format
+  spec when it sits ~150K tokens away from where they actually generate.
+  This block sits right after the opinion/critique list — i.e. right
+  before generation begins — so the format requirements are the most
+  recent thing the model has seen. Empirically this is the single biggest
+  driver of parser-success rate at scale.
+  """
+  statement_header = (
+      'Revised Consensus Statement' if is_critique_round
+      else 'Draft Consensus Statement'
+  )
+  return f"""
+
+================================================================================
+NOW PRODUCE YOUR OUTPUT. Use this format EXACTLY — both headers are MANDATORY:
+
+## Reasoning:
+[Your step-by-step reasoning here. Reference specific opinion numbers
+{'and critique numbers ' if is_critique_round else ''}where helpful.]
+
+## {statement_header}:
+[The consensus statement only. Written as the group's voice in first person
+plural ("We believe..."). NO references to opinion or critique numbers.]
+
+START YOUR RESPONSE WITH "## Reasoning:" — do not preface, do not summarise,
+do not output anything before that header. Both headers MUST appear, each on
+its own line, exactly as shown above (with the colon, with the "##").
+================================================================================
+"""
+
+
+def _length_instruction(target_word_count: int | None) -> str:
+  """Builds an explicit length-target clause to append to the prompt.
+
+  The default prompts say "Length follows substance — typically one
+  substantial paragraph". When the caller passes target_word_count, we want
+  to override that with a concrete word target so long-form deliberations
+  produce long-form statements that match the depth of the input opinions.
+  """
+  if target_word_count is None:
+    return ''
+  # The instruction is appended at the end so the model sees it last and
+  # treats it as authoritative over the earlier "typically one paragraph"
+  # guidance. ±20% gives the model room rather than forcing a brittle target.
+  low = int(target_word_count * 0.8)
+  high = int(target_word_count * 1.2)
+  return (
+      "\n\nLENGTH TARGET: Aim for approximately "
+      f"{target_word_count} words in the final consensus statement "
+      f"(roughly {low}-{high} words). The participants' opinions are "
+      "long-form, so the statement should match that depth — develop the "
+      "reasoning, name specifics, and engage substantively with the "
+      "submitted views. Do not pad with filler; if you genuinely cannot "
+      "reach the target without padding, prefer being shorter and tight."
+  )
 
 
 def _generate_prompt(
@@ -210,14 +288,16 @@ def _generate_prompt(
     opinions: Sequence[str],
     previous_winner: str | None = None,
     critiques: Sequence[str] | None = None,
+    target_word_count: int | None = None,
 ) -> str:
   """Generates a prompt for the LLM."""
   if previous_winner is None:
-    return _generate_opinion_only_prompt(question, opinions)
+    base = _generate_opinion_only_prompt(question, opinions)
   else:
-    return _generate_opinion_critique_prompt(
+    base = _generate_opinion_critique_prompt(
         question, opinions, previous_winner, critiques
     )
+  return base + _length_instruction(target_word_count)
 
 
 def _process_model_response(response: str) -> tuple[str, str]:
@@ -227,10 +307,10 @@ def _process_model_response(response: str) -> tuple[str, str]:
       response: The raw model response.
 
   Returns:
-      A tuple of (statement, explanation).  If the response format is
+      A tuple of (statement, explanation). If the response format is
       incorrect, returns ("", "INCORRECT_TEMPLATE").
   """
-  # Try new markdown format first (either "Draft" or "Revised" Consensus Statement)
+  # Try the canonical markdown format first (## headers with colons).
   match = re.search(
       r'##\s*Reasoning:\s*(.*?)##\s*(?:Draft|Revised)\s+Consensus Statement:\s*(.*?)(?:\n##|$)',
       response,
@@ -239,18 +319,50 @@ def _process_model_response(response: str) -> tuple[str, str]:
   if match:
     explanation = match.group(1).strip()
     statement = match.group(2).strip()
-    return statement, explanation
+    if statement:
+      return statement, explanation
 
-  # Fall back to old XML-like format for backward compatibility
+  # Forgiving fallback: header markup the model sometimes drifts to —
+  # bold (**Reasoning**), missing colons, "Final" instead of "Draft" /
+  # "Revised", or an extra blank "##" line. We just need to find the
+  # boundary between the reasoning block and the statement block.
+  flexible_pattern = (
+      r'(?:^|\n)\s*'
+      r'(?:#{1,3}\s*|\*\*\s*)?'
+      r'Reasoning\s*[:\*]*\s*'
+      r'(?:#{0,3}\s*|\*\*)?\s*'
+      r'(.*?)'
+      r'(?:^|\n)\s*'
+      r'(?:#{1,3}\s*|\*\*\s*)?'
+      r'(?:Draft|Revised|Final)?\s*Consensus\s+Statement\s*[:\*]*\s*'
+      r'(?:#{0,3}\s*|\*\*)?\s*'
+      r'(.*?)(?:\n##|\n\*\*[A-Z]|$)'
+  )
+  match = re.search(flexible_pattern, response, re.DOTALL | re.IGNORECASE | re.MULTILINE)
+  if match:
+    explanation = match.group(1).strip()
+    statement = match.group(2).strip()
+    if statement:
+      return statement, explanation
+
+  # Fall back to old XML-like format for backward compatibility.
   match = re.search(
       r'<answer>\s*(.*?)\s*<sep>\s*(.*?)\s*</answer>', response, re.DOTALL
   )
   if match:
     explanation = match.group(1).strip()
     statement = match.group(2).strip()
-    return statement, explanation
+    if statement:
+      return statement, explanation
 
-  return '', 'INCORRECT_TEMPLATE'
+  # No parser matched — return a truncated snippet of the raw response in
+  # the explanation so callers can tell at a glance whether the problem is
+  # an empty response (e.g. max_tokens exhausted on thinking), a safety
+  # filter, or genuine format drift.
+  if not response:
+    return '', 'INCORRECT_TEMPLATE: <empty response from model>'
+  snippet = response[:200].replace('\n', ' ⏎ ')
+  return '', f'INCORRECT_TEMPLATE: {snippet!r}'
 
 
 class COTModel(base_model.BaseStatementModel):
@@ -266,6 +378,7 @@ class COTModel(base_model.BaseStatementModel):
       seed: int | None = None,
       override_prompt: str | None = None,
       num_retries_on_error: int = 1,
+      target_word_count: int | None = None,
   ) -> base_model.StatementResult:
     """Generates a statement (see base model)."""
     if num_retries_on_error is None:
@@ -273,11 +386,19 @@ class COTModel(base_model.BaseStatementModel):
     else:
       if num_retries_on_error < 0:
         raise ValueError('num_retries_on_error must be None or at least 0.')
-    prompt = _generate_prompt(question, opinions, previous_winner, critiques)
+    prompt = _generate_prompt(
+        question, opinions, previous_winner, critiques, target_word_count
+    )
     statement, explanation = '', ''  # Dummy result.
     for _ in range(num_retries_on_error):
+      # max_tokens=16384 — Gemini 2.5/3 thinking models burn output-token
+      # budget on internal reasoning before producing visible text. The
+      # default 4096 is enough for a 250-word paragraph but gets entirely
+      # consumed by thinking on long-context calls, leaving zero visible
+      # output. 16384 gives ~8K thinking + ~8K visible output, which
+      # comfortably covers even the long-form (target_word_count) mode.
       response = llm_client.sample_text(
-          prompt, terminators=[], seed=seed)
+          prompt, terminators=[], seed=seed, max_tokens=16384)
 
       statement, explanation = _process_model_response(response)
       if len(statement) > 5 and 'INCORRECT' not in explanation:

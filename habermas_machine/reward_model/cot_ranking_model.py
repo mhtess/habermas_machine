@@ -88,12 +88,17 @@ def _generate_opinion_critique_prompt(
     critique: str,
 ) -> str:
   """Generates a prompt for the LLM using opinion and critique."""
-  prompt = f"""As an AI assistant, your job is to rank these statements in the order that the participant would most likely agree with them, based on their opinion and critique to a summary statement from a previous discussion round. Use Arrow notation for the ranking, where ">" means "preferred to". Ties are NOT allowed and items should be in descending order of preference so you can ONLY use ">" and the letters of the statements in the ranking. Examples of valid rankings: B > A, D > A > C > B, B > C > A > E > D.
+  n = len(statements)
+  last_letter = chr(ord('A') + n - 1)
+  full_alphabet = ', '.join(chr(ord('A') + i) for i in range(n))
+  prompt = f"""As an AI assistant, your job is to rank these statements in the order that the participant would most likely agree with them, based on their opinion and critique to a summary statement from a previous discussion round. Use Arrow notation for the ranking, where ">" means "preferred to". Ties are NOT allowed and items should be in descending order of preference so you can ONLY use ">" and the letters of the statements in the ranking.
+
+CRITICAL: Your ranking MUST include ALL {n} letters ({full_alphabet}) — every letter from A to {last_letter}, each appearing EXACTLY ONCE. A ranking that omits any letter is invalid and will be rejected. Even if some statements seem clearly worse than others, you MUST still place every letter somewhere in the ordering.
 
 You MUST provide your answer in the following format. Output the Final Ranking FIRST, then the Reasoning:
 
 ## Final Ranking:
-[ranking using arrow notation ONLY - just the letters and > symbols, nothing else]
+[ranking using arrow notation ONLY - all {n} letters separated by > symbols, nothing else]
 
 ## Reasoning:
 [Brief explanation - one sentence per statement is sufficient]
@@ -135,12 +140,17 @@ def _generate_opinion_only_prompt(
     statements: Sequence[str],
 ) -> str:
   """Generates a prompt for the LLM using only the opinion."""
-  prompt = f"""As an AI assistant, your job is to rank these statements in the order that the participant would most likely agree with them, based on their opinion. Use Arrow notation for the ranking, where ">" means "preferred to". Ties are NOT allowed and items should be in descending order of preference so you can ONLY use ">" and the letters of the statements in the ranking. Examples of valid rankings: B > A, D > A > C > B, B > C > A > E > D.
+  n = len(statements)
+  last_letter = chr(ord('A') + n - 1)
+  full_alphabet = ', '.join(chr(ord('A') + i) for i in range(n))
+  prompt = f"""As an AI assistant, your job is to rank these statements in the order that the participant would most likely agree with them, based on their opinion. Use Arrow notation for the ranking, where ">" means "preferred to". Ties are NOT allowed and items should be in descending order of preference so you can ONLY use ">" and the letters of the statements in the ranking.
+
+CRITICAL: Your ranking MUST include ALL {n} letters ({full_alphabet}) — every letter from A to {last_letter}, each appearing EXACTLY ONCE. A ranking that omits any letter is invalid and will be rejected. Even if some statements seem clearly worse than others, you MUST still place every letter somewhere in the ordering.
 
 You MUST provide your answer in the following format. Output the Final Ranking FIRST, then the Reasoning:
 
 ## Final Ranking:
-[ranking using arrow notation ONLY - just the letters and > symbols, nothing else]
+[ranking using arrow notation ONLY - all {n} letters separated by > symbols, nothing else]
 
 ## Reasoning:
 [Brief explanation - one sentence per statement is sufficient]

@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 import streamlit as st
+from cost_estimation import CostEstimate, PRICING_AS_OF, estimate_cost
 from habermas_machine import machine, types
 from habermas_machine.llm_client import aistudio_client
 from habermas_machine.social_choice import utils as sc_utils
@@ -58,20 +59,65 @@ with st.sidebar:
         import os
         os.environ['GOOGLE_API_KEY'] = api_key
 
-    # Model selection
+    # Model selection. We curate the dropdown order so that long-context,
+    # higher-quality "pro" variants surface first — at scale (50+ participants
+    # with multi-paragraph opinions) the prompt routinely runs to 100K+ tokens
+    # and the lite variant's reasoning quality degrades noticeably.
+    _preferred_order = (
+        'gemini-pro-latest',
+        'gemini-2.5-pro',
+        'gemini-flash-latest',
+        'gemini-2.5-flash',
+        'gemini-3.1-pro-preview',
+        'gemini-3-flash-preview',
+        'gemini-2.5-flash-lite',
+    )
+    _supported = set(aistudio_client.SUPPORTED_MODELS)
+    _model_options = [m for m in _preferred_order if m in _supported]
+    _model_options += [m for m in aistudio_client.SUPPORTED_MODELS
+                       if m not in _model_options]
     model_name = st.selectbox(
         "Gemini Model",
-        options=list(aistudio_client.SUPPORTED_MODELS),
-        help="Recommended: gemini-flash-latest for best compatibility"
+        options=_model_options,
+        help=(
+            "All listed models support >=1M-token context. "
+            "For small groups (<20), gemini-flash-latest is fastest. "
+            "For larger groups or long opinions, prefer gemini-pro-latest."
+        ),
     )
 
-    # Number of candidates
+    # Number of candidates. Capped at 26 because the per-citizen ranker
+    # uses single-letter labels (A-Z) in both the prompt and its arrow-notation
+    # regex (see reward_model/cot_ranking_model.py). Going past Z would
+    # require switching to multi-char or numeric labels and rewriting the
+    # few-shot examples.
     num_candidates = st.slider(
         "Number of Candidate Statements",
         min_value=2,
-        max_value=8,
+        max_value=26,
         value=4,
-        help="How many alternative consensus statements to generate"
+        help=(
+            "How many alternative consensus statements to generate. "
+            "More candidates = more diversity, but also longer ranking "
+            "prompts and noisier per-citizen rankings past ~10 items."
+        ),
+    )
+
+    # Output length style. The default prompts produce a single substantial
+    # paragraph (~150-300 words) regardless of how long the input opinions
+    # are. With long input opinions (700-1000 words) that mismatch can
+    # erase a lot of substance — "Match input length" tells the model to
+    # produce a long-form statement instead.
+    length_style = st.radio(
+        "Output length",
+        options=("Clear and succinct", "Match input length"),
+        index=0,
+        help=(
+            "Succinct: one tight paragraph, default behaviour. "
+            "Match input length: aim for roughly the average word count "
+            "of the participant opinions (useful when opinions are 700+ "
+            "words and you want statements with comparable depth)."
+        ),
     )
 
     # Number of retries
@@ -81,6 +127,23 @@ with st.sidebar:
         max_value=10,
         value=5,
         help="How many times to retry if the model returns an incorrect format"
+    )
+
+    # Concurrent LLM call cap. Per-citizen ranking calls are independent and
+    # I/O-bound, so parallelism is a big win — but spawning one thread per
+    # citizen at 100+ participants will saturate the API's RPM quota and
+    # trigger 429s. 16 is a safe default for paid Gemini quotas; bump up if
+    # your quota allows.
+    max_concurrent = st.slider(
+        "Max concurrent LLM calls",
+        min_value=1,
+        max_value=64,
+        value=16,
+        help=(
+            "Caps simultaneous ranking calls to the Gemini API. "
+            "Higher = faster, but increases the chance of hitting "
+            "rate limits (transient errors are retried automatically)."
+        ),
     )
 
     st.divider()
@@ -126,6 +189,204 @@ if 'sorted_statements' not in st.session_state:
     st.session_state.sorted_statements = None
 if 'hm' not in st.session_state:
     st.session_state.hm = None
+# Version counters bumped whenever opinions/critiques are bulk-replaced
+# (e.g. by a Sheets import). These get baked into widget `key=` values
+# below so the widgets re-instantiate from the new source data instead
+# of trying to reuse stale per-widget session_state. This is the
+# Streamlit-idiomatic way to force a widget reset — programmatically
+# pre-populating widget keys for unrendered widgets isn't reliable
+# across reruns.
+if 'opinion_version' not in st.session_state:
+    st.session_state.opinion_version = 0
+if 'critique_version' not in st.session_state:
+    st.session_state.critique_version = 0
+# Pending/confirmed flags for the cost-confirmation dialog. The dialog flow
+# is: button click -> set pending_* -> dialog renders -> Confirm sets
+# confirmed_* -> the run executes on the next rerun.
+if 'pending_opinion_run' not in st.session_state:
+    st.session_state.pending_opinion_run = None
+if 'confirmed_opinion_run' not in st.session_state:
+    st.session_state.confirmed_opinion_run = None
+if 'pending_critique_run' not in st.session_state:
+    st.session_state.pending_critique_run = None
+if 'confirmed_critique_run' not in st.session_state:
+    st.session_state.confirmed_critique_run = None
+
+
+def _compute_target_word_count(
+    length_style: str, opinions: list[str]
+) -> int | None:
+    """Maps the length-style radio to a concrete word target for the prompt.
+
+    "Clear and succinct" -> None (model uses its default paragraph guidance).
+    "Match input length" -> avg word count across the input opinions, with a
+    floor so it doesn't collapse to a one-liner if inputs are unusually short.
+    """
+    if length_style != "Match input length" or not opinions:
+        return None
+    avg = sum(len(op.split()) for op in opinions) / len(opinions)
+    return max(150, int(round(avg)))
+
+
+def _render_cost_body(
+    estimate: CostEstimate,
+    num_participants_in_run: int,
+    target_word_count: int | None = None,
+):
+    """Renders the cost summary used inside the confirmation dialog."""
+    # Streamlit treats `$...$` as a LaTeX delimiter, which mangles a price
+    # range like "$2.93 – $5.87" — the inner `2.93 – ` gets pulled into a
+    # math span and the closing `**` bold marker is left orphaned. Escaping
+    # both `$` chars with backslashes keeps it as plain markdown.
+    st.markdown(
+        f"### Estimated cost: "
+        f"**\\${estimate.cost_low_usd:.2f} – \\${estimate.cost_high_usd:.2f}**"
+    )
+    st.markdown(
+        f"**Estimated runtime:** {_format_runtime_range(estimate)}"
+    )
+    if target_word_count is not None:
+        st.markdown(
+            f"**Output target:** ~{target_word_count} words per statement "
+            "(matching average input length)"
+        )
+    col_a, col_b, col_c = st.columns(3)
+    col_a.metric("Participants", num_participants_in_run)
+    col_b.metric("LLM calls", f"~{estimate.num_llm_calls}")
+    col_c.metric(
+        "Total tokens (in / out)",
+        f"~{estimate.input_tokens // 1000}K / ~{estimate.output_tokens // 1000}K",
+        help=(
+            "Summed across ALL LLM calls in this round (statement "
+            "generation + per-citizen ranking). NOT the size of any single "
+            "prompt — see 'Max single prompt' below for the per-call "
+            "context-window check."
+        ),
+    )
+
+    # Per-call context-window check. The "Total tokens (in)" number above
+    # can exceed the model's context window at large N, but that's only a
+    # problem if any *individual* prompt is too big. Statement-generation
+    # prompts contain every opinion and dominate, so we compare them to
+    # the model's context window.
+    col_d, col_e = st.columns(2)
+    col_d.metric(
+        "Max single prompt",
+        f"~{estimate.max_single_prompt_tokens // 1000}K tokens",
+        help=(
+            "Largest prompt in the round (statement-generation calls "
+            "include every opinion). This is what has to fit in the "
+            "model's context window."
+        ),
+    )
+    col_e.metric(
+        "Model context window",
+        f"{estimate.context_window_tokens // 1000}K tokens",
+        help="Per-call input limit for the selected Gemini model.",
+    )
+    utilisation = estimate.context_window_utilisation
+    if not estimate.fits_in_context:
+        st.error(
+            f"⚠️ The largest prompt is ~{estimate.max_single_prompt_tokens:,} "
+            f"tokens, which **exceeds** this model's "
+            f"{estimate.context_window_tokens:,}-token context window. "
+            "The API will truncate the input or reject the call. "
+            "Switch to a longer-context model, reduce the number of "
+            "participants, or shorten the opinions."
+        )
+    elif utilisation > 0.8:
+        st.warning(
+            f"The largest prompt uses ~{utilisation:.0%} of the model's "
+            "context window. You're close to the limit — quality may "
+            "degrade and there's little headroom for longer critiques in "
+            "the next round."
+        )
+
+    st.caption(
+        f"Rough estimate based on prompt size and Gemini list pricing "
+        f"(as of {PRICING_AS_OF}). Actual cost and runtime depend on model "
+        "behavior, current pricing, and API load — treat the ranges as "
+        "ballparks, not quotes."
+    )
+    if estimate.long_tier_in_play:
+        st.info(
+            "ℹ️ At least one prompt in this round exceeds the 200K-token "
+            "threshold for the selected model, so those calls are billed "
+            "at the higher long-context rate (about 2× input, 1.5× output). "
+            "The estimate above already accounts for this."
+        )
+    if not estimate.pricing_known:
+        st.warning(
+            "No pricing data on file for the selected model — falling back "
+            "to Gemini Pro list rates, which may overestimate the cost."
+        )
+    if not estimate.context_window_known:
+        st.warning(
+            "No context-window data on file for the selected model — "
+            f"using a conservative {estimate.context_window_tokens:,}-token "
+            "fallback. The actual model may accept more."
+        )
+    if estimate.is_critique:
+        st.info(
+            "Critique rounds re-run the full pipeline with critiques + the "
+            "previous winner added to the prompt, so they're slightly more "
+            "expensive than the opinion round."
+        )
+
+
+def _format_runtime_range(estimate: CostEstimate) -> str:
+    """Formats the runtime range as a human-friendly string (e.g. '2-5 min')."""
+    def _fmt(s: float) -> str:
+        if s < 60:
+            return f"{s:.0f} sec"
+        if s < 3600:
+            return f"{s / 60:.1f} min"
+        return f"{s / 3600:.1f} hr"
+    return f"{_fmt(estimate.runtime_low_s)} – {_fmt(estimate.runtime_high_s)}"
+
+
+@st.dialog("Confirm deliberation cost", width="large")
+def _confirm_opinion_dialog(
+    estimate: CostEstimate,
+    num_participants_in_run: int,
+    target_word_count: int | None,
+):
+    _render_cost_body(estimate, num_participants_in_run, target_word_count)
+    col1, col2 = st.columns(2)
+    if col1.button("✅ Confirm and run", type="primary", use_container_width=True,
+                   key="confirm_opinion_btn"):
+        # Promote the pending params dict into confirmed_* so the run path
+        # can read target_word_count after the dialog closes.
+        st.session_state.confirmed_opinion_run = (
+            st.session_state.pending_opinion_run
+        )
+        st.session_state.pending_opinion_run = None
+        st.rerun()
+    if col2.button("❌ Cancel", use_container_width=True,
+                   key="cancel_opinion_btn"):
+        st.session_state.pending_opinion_run = None
+        st.rerun()
+
+
+@st.dialog("Confirm critique-round cost", width="large")
+def _confirm_critique_dialog(
+    estimate: CostEstimate,
+    num_participants_in_run: int,
+    target_word_count: int | None,
+):
+    _render_cost_body(estimate, num_participants_in_run, target_word_count)
+    col1, col2 = st.columns(2)
+    if col1.button("✅ Confirm and run", type="primary", use_container_width=True,
+                   key="confirm_critique_btn"):
+        st.session_state.confirmed_critique_run = (
+            st.session_state.pending_critique_run
+        )
+        st.session_state.pending_critique_run = None
+        st.rerun()
+    if col2.button("❌ Cancel", use_container_width=True,
+                   key="cancel_critique_btn"):
+        st.session_state.pending_critique_run = None
+        st.rerun()
 
 # Question input
 question = st.text_area(
@@ -181,14 +442,15 @@ if SHEETS_AVAILABLE:
                         if not imported_opinions:
                             st.error("No opinions found in the sheet. Check the column letter and row numbers.")
                         else:
-                            # Update session state with imported data
+                            # Bump the version so every text_area below gets
+                            # a fresh key and re-instantiates from
+                            # opinions[i] via value= — without this, page 2+
+                            # widgets would otherwise either reuse stale
+                            # widget state or fail to pick up the imported
+                            # text at all.
+                            st.session_state.opinion_version += 1
                             st.session_state.opinions = imported_opinions
 
-                            # Also set individual widget states (since text areas use keys)
-                            for i, op in enumerate(imported_opinions):
-                                st.session_state[f"opinion_{i}"] = op
-
-                            # Also update the question if found
                             if imported_question and imported_question != 'nan':
                                 st.session_state.imported_question = imported_question
 
@@ -196,7 +458,6 @@ if SHEETS_AVAILABLE:
                             if imported_question:
                                 st.info(f"💡 Detected question: {imported_question[:100]}...")
 
-                            # Force a rerun to show the imported data
                             st.rerun()
 
                 except Exception as e:
@@ -226,9 +487,14 @@ with col2:
     num_participants = st.number_input(
         "Number of Participants",
         min_value=2,
-        max_value=20,
+        max_value=200,
         value=len(st.session_state.opinions),
-        help="Adjust to add or remove opinion boxes"
+        help=(
+            "Adjust to add or remove opinion boxes. "
+            "For >40 participants, use a long-context model "
+            "(e.g. gemini-2.5-pro / gemini-pro-latest) and expect "
+            "deliberation to take several minutes."
+        ),
     )
 
 # Adjust opinions list based on participant count
@@ -237,32 +503,96 @@ if num_participants > len(st.session_state.opinions):
 elif num_participants < len(st.session_state.opinions):
     st.session_state.opinions = st.session_state.opinions[:num_participants]
 
-# Opinion input fields
-for i in range(num_participants):
-    # Initialize widget key from opinions list if not already set
-    if f"opinion_{i}" not in st.session_state:
-        st.session_state[f"opinion_{i}"] = st.session_state.opinions[i]
-    st.text_area(
-        f"Participant {i+1}",
-        height=120,
-        key=f"opinion_{i}"
+# Opinion input fields. We paginate above ~25 participants so Streamlit
+# doesn't have to re-render hundreds of text areas on every interaction.
+# Each text_area uses a key that bakes in opinion_version, so a Sheets
+# import (which bumps the version) forces every widget across every page
+# to re-instantiate with value=opinions[i] instead of trying to reuse
+# stale per-widget session_state — which is the bug pages 2+ hit otherwise.
+OPINION_PAGE_SIZE = 25
+
+if num_participants > OPINION_PAGE_SIZE:
+    num_pages = (num_participants - 1) // OPINION_PAGE_SIZE + 1
+    page = st.number_input(
+        f"Page (showing {OPINION_PAGE_SIZE} participants per page)",
+        min_value=1,
+        max_value=num_pages,
+        value=1,
+        key="opinion_page",
     )
-    # Sync widget value back to opinions list
-    st.session_state.opinions[i] = st.session_state[f"opinion_{i}"]
+    start_idx = (page - 1) * OPINION_PAGE_SIZE
+    end_idx = min(start_idx + OPINION_PAGE_SIZE, num_participants)
+    st.caption(
+        f"Showing participants {start_idx + 1}–{end_idx} "
+        f"of {num_participants}"
+    )
+else:
+    start_idx, end_idx = 0, num_participants
+
+_op_version = st.session_state.opinion_version
+for i in range(start_idx, end_idx):
+    _key = f"opinion_v{_op_version}_{i}"
+    st.text_area(
+        f"Participant {i + 1}",
+        value=st.session_state.opinions[i],
+        height=120,
+        key=_key,
+    )
+    # Sync the widget's current value (which may be the user's edits since
+    # the last rerun) back into the canonical opinions list immediately.
+    st.session_state.opinions[i] = st.session_state[_key]
 
 st.divider()
 
-# Run opinion round
-if st.button("🚀 Run Opinion Round", type="primary", use_container_width=True):
-    # Validate inputs
+# Run opinion round (gated behind a cost-estimate confirmation dialog).
+opinion_btn_clicked = st.button(
+    "🚀 Run Opinion Round", type="primary", use_container_width=True
+)
+
+if opinion_btn_clicked:
+    # Validate before opening the dialog so we don't spend a click on
+    # something that's going to fail validation anyway.
     if not question.strip():
         st.error("Please enter a discussion question.")
-        st.stop()
+    else:
+        _valid_opinions = [
+            op.strip() for op in st.session_state.opinions if op.strip()
+        ]
+        if len(_valid_opinions) < 2:
+            st.error("Please enter at least 2 participant opinions.")
+        else:
+            _target_word_count = _compute_target_word_count(
+                length_style, _valid_opinions
+            )
+            _estimate = estimate_cost(
+                question=question,
+                opinions=_valid_opinions,
+                num_candidates=num_candidates,
+                model_name=model_name,
+                max_concurrent_calls=max_concurrent,
+                target_word_count=_target_word_count,
+            )
+            st.session_state.pending_opinion_run = {
+                'estimate': _estimate,
+                'num_participants_in_run': len(_valid_opinions),
+                'target_word_count': _target_word_count,
+            }
 
-    valid_opinions = [op.strip() for op in st.session_state.opinions if op.strip()]
-    if len(valid_opinions) < 2:
-        st.error("Please enter at least 2 participant opinions.")
-        st.stop()
+if st.session_state.pending_opinion_run is not None:
+    _pending = st.session_state.pending_opinion_run
+    _confirm_opinion_dialog(
+        _pending['estimate'],
+        _pending['num_participants_in_run'],
+        _pending.get('target_word_count'),
+    )
+
+if st.session_state.confirmed_opinion_run:
+    _confirmed = st.session_state.confirmed_opinion_run
+    st.session_state.confirmed_opinion_run = None
+    target_word_count_for_run = _confirmed.get('target_word_count')
+    valid_opinions = [
+        op.strip() for op in st.session_state.opinions if op.strip()
+    ]
 
     # Initialize Habermas Machine
     with st.spinner("Initializing Habermas Machine..."):
@@ -287,7 +617,8 @@ if st.button("🚀 Run Opinion Round", type="primary", use_container_width=True)
                 num_citizens=len(valid_opinions),
                 verbose=True,  # Enable logging to terminal
                 num_retries_on_error=num_retries,
-                max_workers=len(valid_opinions),
+                max_workers=min(max_concurrent, len(valid_opinions)),
+                target_word_count=target_word_count_for_run,
             )
 
             print("\n" + "="*80)
@@ -357,6 +688,33 @@ if st.button("🚀 Run Opinion Round", type="primary", use_container_width=True)
             status.write("✅ Rankings computed")
             status.update(label="✅ Deliberation complete!", state="complete")
 
+        # If the reward model couldn't get a parseable ranking out of some
+        # citizens (typically the LLM returning a partial ordering even
+        # after retries), surface them outside the status block. Their
+        # rows were dropped from aggregation rather than failing the run.
+        dropped = hm.last_round_dropped_citizens
+        if dropped:
+            st.warning(
+                f"⚠️ {len(dropped)} of {len(valid_opinions)} participants "
+                "were dropped from ranking aggregation because the reward "
+                "model couldn't return a complete ranking after retries "
+                f"(citizens {dropped}). The consensus statement above "
+                f"reflects the remaining {len(valid_opinions) - len(dropped)} "
+                "participants."
+            )
+
+        # Same for candidate statements — empty/unparseable ones are filtered
+        # out before ranking. Worth flagging because at high drop rates the
+        # ranking signal degrades even if the run completes.
+        if hm.last_round_dropped_candidates:
+            st.warning(
+                f"⚠️ {hm.last_round_dropped_candidates} of {num_candidates} "
+                "candidate statements came back empty or unparseable from "
+                "the statement model and were dropped before ranking. "
+                "If this happens repeatedly, try fewer candidates, a "
+                "shorter context, or a more capable model."
+            )
+
     except Exception as e:
         st.error(f"Error running deliberation: {str(e)}")
         st.exception(e)
@@ -424,16 +782,14 @@ if st.session_state.winner:
                             if not imported_critiques:
                                 st.error("No critiques found in the sheet. Check the column letter.")
                             else:
-                                # Update session state with imported critiques
+                                # Bump the version so every critique
+                                # text_area below gets a fresh key — same
+                                # rationale as the opinion import path.
+                                st.session_state.critique_version += 1
                                 st.session_state.critiques = imported_critiques
-
-                                # Also set individual widget states
-                                for i, crit in enumerate(imported_critiques):
-                                    st.session_state[f"critique_{i}"] = crit
 
                                 st.success(f"✅ Imported {len(imported_critiques)} critiques from Google Sheets!")
 
-                                # Force a rerun to show the imported data
                                 st.rerun()
 
                     except Exception as e:
@@ -444,25 +800,109 @@ if st.session_state.winner:
                         - Check that the column letter is correct
                         """)
 
-    # Critique inputs
-    # Determine number of critiques based on opinions
-    num_critique_boxes = len([op for op in st.session_state.opinions if op.strip()])
+    # Critique inputs. Number of critique boxes mirrors the number of
+    # non-empty opinions; paginate the same way as the opinion section,
+    # using critique_version-keyed widgets so a Sheets import reliably
+    # repopulates every page (not just page 1).
+    num_critique_boxes = len(
+        [op for op in st.session_state.opinions if op.strip()]
+    )
 
-    for i in range(num_critique_boxes):
-        st.session_state.critiques[i] = st.text_area(
-            f"Critique from Participant {i+1}",
-            value=st.session_state.critiques[i],
-            height=80,
-            key=f"critique_{i}"
+    # Make sure the critiques list is long enough.
+    if len(st.session_state.critiques) < num_critique_boxes:
+        st.session_state.critiques.extend(
+            [""] * (num_critique_boxes - len(st.session_state.critiques))
         )
 
-    # Run critique round
-    if st.button("🔄 Run Critique Round", type="secondary", use_container_width=True):
-        valid_critiques = [c.strip() for c in st.session_state.critiques if c.strip()]
+    CRITIQUE_PAGE_SIZE = 25
 
-        if len(valid_critiques) < 2:
-            st.error("Please enter at least 2 critiques to run the critique round.")
-            st.stop()
+    if num_critique_boxes > CRITIQUE_PAGE_SIZE:
+        c_num_pages = (num_critique_boxes - 1) // CRITIQUE_PAGE_SIZE + 1
+        c_page = st.number_input(
+            f"Page (showing {CRITIQUE_PAGE_SIZE} critiques per page)",
+            min_value=1,
+            max_value=c_num_pages,
+            value=1,
+            key="critique_page",
+        )
+        c_start = (c_page - 1) * CRITIQUE_PAGE_SIZE
+        c_end = min(c_start + CRITIQUE_PAGE_SIZE, num_critique_boxes)
+        st.caption(
+            f"Showing critiques {c_start + 1}–{c_end} "
+            f"of {num_critique_boxes}"
+        )
+    else:
+        c_start, c_end = 0, num_critique_boxes
+
+    _crit_version = st.session_state.critique_version
+    for i in range(c_start, c_end):
+        _key = f"critique_v{_crit_version}_{i}"
+        st.text_area(
+            f"Critique from Participant {i + 1}",
+            value=st.session_state.critiques[i],
+            height=80,
+            key=_key,
+        )
+        st.session_state.critiques[i] = st.session_state[_key]
+
+    # Run critique round (gated behind a cost-estimate confirmation dialog).
+    critique_btn_clicked = st.button(
+        "🔄 Run Critique Round", type="secondary", use_container_width=True
+    )
+
+    if critique_btn_clicked:
+        _valid_critiques = [
+            c.strip() for c in st.session_state.critiques if c.strip()
+        ]
+        if len(_valid_critiques) < 2:
+            st.error(
+                "Please enter at least 2 critiques to run the critique round."
+            )
+        else:
+            _valid_opinions_for_estimate = [
+                op.strip() for op in st.session_state.opinions if op.strip()
+            ]
+            _target_word_count = _compute_target_word_count(
+                length_style, _valid_opinions_for_estimate
+            )
+            _estimate = estimate_cost(
+                question=question,
+                opinions=_valid_opinions_for_estimate,
+                num_candidates=num_candidates,
+                model_name=model_name,
+                previous_winner=st.session_state.winner,
+                critiques=_valid_critiques,
+                max_concurrent_calls=max_concurrent,
+                target_word_count=_target_word_count,
+            )
+            st.session_state.pending_critique_run = {
+                'estimate': _estimate,
+                'num_participants_in_run': len(_valid_critiques),
+                'target_word_count': _target_word_count,
+            }
+
+    if st.session_state.pending_critique_run is not None:
+        _pending = st.session_state.pending_critique_run
+        _confirm_critique_dialog(
+            _pending['estimate'],
+            _pending['num_participants_in_run'],
+            _pending.get('target_word_count'),
+        )
+
+    if st.session_state.confirmed_critique_run:
+        _confirmed = st.session_state.confirmed_critique_run
+        st.session_state.confirmed_critique_run = None
+        valid_critiques = [
+            c.strip() for c in st.session_state.critiques if c.strip()
+        ]
+        # Apply the (possibly updated) length style to the existing HM
+        # instance — it was built during the opinion round, so if the user
+        # toggled the radio between rounds we need to push the new target
+        # in before mediate() runs again.
+        if st.session_state.hm is not None:
+            st.session_state.hm._target_word_count = (
+                _confirmed.get('target_word_count')
+            )
 
         print("\n" + "="*80)
         print(f"STARTING CRITIQUE ROUND")
@@ -531,6 +971,28 @@ if st.session_state.winner:
 
             st.markdown("### 🏆 Refined Consensus Statement")
             st.success(winner)
+
+                # Same drop warning as the opinion round.
+                dropped = hm.last_round_dropped_citizens
+                if dropped:
+                    st.warning(
+                        f"⚠️ {len(dropped)} of {len(valid_critiques)} "
+                        "participants were dropped from ranking aggregation "
+                        "because the reward model couldn't return a complete "
+                        f"ranking after retries (citizens {dropped}). The "
+                        "refined statement above reflects the remaining "
+                        f"{len(valid_critiques) - len(dropped)} participants."
+                    )
+
+                if hm.last_round_dropped_candidates:
+                    st.warning(
+                        f"⚠️ {hm.last_round_dropped_candidates} of "
+                        f"{num_candidates} refined statements came back "
+                        "empty or unparseable from the statement model "
+                        "and were dropped before ranking. If this happens "
+                        "repeatedly, try fewer candidates, a shorter "
+                        "context, or a more capable model."
+                    )
 
             with st.expander("📋 View All Refined Statements (Ranked)"):
                 for i, stmt in enumerate(sorted_statements, 1):
