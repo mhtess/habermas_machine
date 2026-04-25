@@ -69,6 +69,7 @@ class HabermasMachine:
       verbose: bool = False,
       num_retries_on_error: int | None = 8,
       max_workers: int = 1,
+      target_word_count: int | None = None,
   ):
     """Initializes the Habermas Machine.
 
@@ -77,6 +78,11 @@ class HabermasMachine:
         the original serial behavior. Higher values issue rankings in parallel
         via a thread pool (LLM calls are I/O-bound, so threads work well).
         The effective pool size is min(max_workers, num_citizens).
+      target_word_count: If set, instructs the statement model to aim for
+        this many words in each candidate consensus statement. Used to make
+        long deliberations produce long-form summaries that match the depth
+        of the input opinions. If None, the model's default length guidance
+        applies (typically a single substantial paragraph).
     """
     self._question = question  # Question to be answered.
     self._round = 0  # Current round (round 0 is the opinion round).
@@ -102,6 +108,7 @@ class HabermasMachine:
     if max_workers < 1:
       raise ValueError(f'max_workers must be >= 1, got {max_workers}.')
     self._max_workers = max_workers
+    self._target_word_count = target_word_count
 
   def _get_new_seed(self):
     """Generates a new random seed."""
@@ -129,6 +136,7 @@ class HabermasMachine:
           critiques=shuffled_critiques,
           seed=self._get_new_seed(),
           num_retries_on_error=self._num_retries_on_error,
+          target_word_count=self._target_word_count,
       )
       statements.append(statement)
       explanations.append(explanation)

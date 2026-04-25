@@ -103,6 +103,23 @@ with st.sidebar:
         ),
     )
 
+    # Output length style. The default prompts produce a single substantial
+    # paragraph (~150-300 words) regardless of how long the input opinions
+    # are. With long input opinions (700-1000 words) that mismatch can
+    # erase a lot of substance — "Match input length" tells the model to
+    # produce a long-form statement instead.
+    length_style = st.radio(
+        "Output length",
+        options=("Clear and succinct", "Match input length"),
+        index=0,
+        help=(
+            "Succinct: one tight paragraph, default behaviour. "
+            "Match input length: aim for roughly the average word count "
+            "of the participant opinions (useful when opinions are 700+ "
+            "words and you want statements with comparable depth)."
+        ),
+    )
+
     # Number of retries
     num_retries = st.slider(
         "Retries on Error",
@@ -185,12 +202,43 @@ if 'confirmed_critique_run' not in st.session_state:
     st.session_state.confirmed_critique_run = None
 
 
-def _render_cost_body(estimate: CostEstimate, num_participants_in_run: int):
+def _compute_target_word_count(
+    length_style: str, opinions: list[str]
+) -> int | None:
+    """Maps the length-style radio to a concrete word target for the prompt.
+
+    "Clear and succinct" -> None (model uses its default paragraph guidance).
+    "Match input length" -> avg word count across the input opinions, with a
+    floor so it doesn't collapse to a one-liner if inputs are unusually short.
+    """
+    if length_style != "Match input length" or not opinions:
+        return None
+    avg = sum(len(op.split()) for op in opinions) / len(opinions)
+    return max(150, int(round(avg)))
+
+
+def _render_cost_body(
+    estimate: CostEstimate,
+    num_participants_in_run: int,
+    target_word_count: int | None = None,
+):
     """Renders the cost summary used inside the confirmation dialog."""
+    # Streamlit treats `$...$` as a LaTeX delimiter, which mangles a price
+    # range like "$2.93 – $5.87" — the inner `2.93 – ` gets pulled into a
+    # math span and the closing `**` bold marker is left orphaned. Escaping
+    # both `$` chars with backslashes keeps it as plain markdown.
     st.markdown(
         f"### Estimated cost: "
-        f"**${estimate.cost_low_usd:.2f} – ${estimate.cost_high_usd:.2f}**"
+        f"**\\${estimate.cost_low_usd:.2f} – \\${estimate.cost_high_usd:.2f}**"
     )
+    st.markdown(
+        f"**Estimated runtime:** {_format_runtime_range(estimate)}"
+    )
+    if target_word_count is not None:
+        st.markdown(
+            f"**Output target:** ~{target_word_count} words per statement "
+            "(matching average input length)"
+        )
     col_a, col_b, col_c = st.columns(3)
     col_a.metric("Participants", num_participants_in_run)
     col_b.metric("LLM calls", f"~{estimate.num_llm_calls}")
@@ -200,8 +248,8 @@ def _render_cost_body(estimate: CostEstimate, num_participants_in_run: int):
     )
     st.caption(
         "Rough estimate based on prompt size and Gemini list pricing. "
-        "Actual cost depends on model behavior and current pricing — "
-        "treat the range as a ballpark, not a quote."
+        "Actual cost and runtime depend on model behavior, current pricing, "
+        "and API load — treat the ranges as ballparks, not quotes."
     )
     if not estimate.pricing_known:
         st.warning(
@@ -216,13 +264,32 @@ def _render_cost_body(estimate: CostEstimate, num_participants_in_run: int):
         )
 
 
+def _format_runtime_range(estimate: CostEstimate) -> str:
+    """Formats the runtime range as a human-friendly string (e.g. '2-5 min')."""
+    def _fmt(s: float) -> str:
+        if s < 60:
+            return f"{s:.0f} sec"
+        if s < 3600:
+            return f"{s / 60:.1f} min"
+        return f"{s / 3600:.1f} hr"
+    return f"{_fmt(estimate.runtime_low_s)} – {_fmt(estimate.runtime_high_s)}"
+
+
 @st.dialog("Confirm deliberation cost", width="large")
-def _confirm_opinion_dialog(estimate: CostEstimate, num_participants_in_run: int):
-    _render_cost_body(estimate, num_participants_in_run)
+def _confirm_opinion_dialog(
+    estimate: CostEstimate,
+    num_participants_in_run: int,
+    target_word_count: int | None,
+):
+    _render_cost_body(estimate, num_participants_in_run, target_word_count)
     col1, col2 = st.columns(2)
     if col1.button("✅ Confirm and run", type="primary", use_container_width=True,
                    key="confirm_opinion_btn"):
-        st.session_state.confirmed_opinion_run = True
+        # Promote the pending params dict into confirmed_* so the run path
+        # can read target_word_count after the dialog closes.
+        st.session_state.confirmed_opinion_run = (
+            st.session_state.pending_opinion_run
+        )
         st.session_state.pending_opinion_run = None
         st.rerun()
     if col2.button("❌ Cancel", use_container_width=True,
@@ -232,12 +299,18 @@ def _confirm_opinion_dialog(estimate: CostEstimate, num_participants_in_run: int
 
 
 @st.dialog("Confirm critique-round cost", width="large")
-def _confirm_critique_dialog(estimate: CostEstimate, num_participants_in_run: int):
-    _render_cost_body(estimate, num_participants_in_run)
+def _confirm_critique_dialog(
+    estimate: CostEstimate,
+    num_participants_in_run: int,
+    target_word_count: int | None,
+):
+    _render_cost_body(estimate, num_participants_in_run, target_word_count)
     col1, col2 = st.columns(2)
     if col1.button("✅ Confirm and run", type="primary", use_container_width=True,
                    key="confirm_critique_btn"):
-        st.session_state.confirmed_critique_run = True
+        st.session_state.confirmed_critique_run = (
+            st.session_state.pending_critique_run
+        )
         st.session_state.pending_critique_run = None
         st.rerun()
     if col2.button("❌ Cancel", use_container_width=True,
@@ -422,25 +495,35 @@ if opinion_btn_clicked:
         if len(_valid_opinions) < 2:
             st.error("Please enter at least 2 participant opinions.")
         else:
+            _target_word_count = _compute_target_word_count(
+                length_style, _valid_opinions
+            )
             _estimate = estimate_cost(
                 question=question,
                 opinions=_valid_opinions,
                 num_candidates=num_candidates,
                 model_name=model_name,
+                max_concurrent_calls=max_concurrent,
+                target_word_count=_target_word_count,
             )
             st.session_state.pending_opinion_run = {
                 'estimate': _estimate,
                 'num_participants_in_run': len(_valid_opinions),
+                'target_word_count': _target_word_count,
             }
 
 if st.session_state.pending_opinion_run is not None:
     _pending = st.session_state.pending_opinion_run
     _confirm_opinion_dialog(
-        _pending['estimate'], _pending['num_participants_in_run']
+        _pending['estimate'],
+        _pending['num_participants_in_run'],
+        _pending.get('target_word_count'),
     )
 
 if st.session_state.confirmed_opinion_run:
+    _confirmed = st.session_state.confirmed_opinion_run
     st.session_state.confirmed_opinion_run = None
+    target_word_count_for_run = _confirmed.get('target_word_count')
     valid_opinions = [
         op.strip() for op in st.session_state.opinions if op.strip()
     ]
@@ -469,6 +552,7 @@ if st.session_state.confirmed_opinion_run:
                 verbose=True,  # Enable logging to terminal
                 num_retries_on_error=num_retries,
                 max_workers=min(max_concurrent, len(valid_opinions)),
+                target_word_count=target_word_count_for_run,
             )
 
             print("\n" + "="*80)
@@ -691,6 +775,9 @@ if st.session_state.winner:
             _valid_opinions_for_estimate = [
                 op.strip() for op in st.session_state.opinions if op.strip()
             ]
+            _target_word_count = _compute_target_word_count(
+                length_style, _valid_opinions_for_estimate
+            )
             _estimate = estimate_cost(
                 question=question,
                 opinions=_valid_opinions_for_estimate,
@@ -698,23 +785,37 @@ if st.session_state.winner:
                 model_name=model_name,
                 previous_winner=st.session_state.winner,
                 critiques=_valid_critiques,
+                max_concurrent_calls=max_concurrent,
+                target_word_count=_target_word_count,
             )
             st.session_state.pending_critique_run = {
                 'estimate': _estimate,
                 'num_participants_in_run': len(_valid_critiques),
+                'target_word_count': _target_word_count,
             }
 
     if st.session_state.pending_critique_run is not None:
         _pending = st.session_state.pending_critique_run
         _confirm_critique_dialog(
-            _pending['estimate'], _pending['num_participants_in_run']
+            _pending['estimate'],
+            _pending['num_participants_in_run'],
+            _pending.get('target_word_count'),
         )
 
     if st.session_state.confirmed_critique_run:
+        _confirmed = st.session_state.confirmed_critique_run
         st.session_state.confirmed_critique_run = None
         valid_critiques = [
             c.strip() for c in st.session_state.critiques if c.strip()
         ]
+        # Apply the (possibly updated) length style to the existing HM
+        # instance — it was built during the opinion round, so if the user
+        # toggled the radio between rounds we need to push the new target
+        # in before mediate() runs again.
+        if st.session_state.hm is not None:
+            st.session_state.hm._target_word_count = (
+                _confirmed.get('target_word_count')
+            )
 
         print("\n" + "="*80)
         print(f"STARTING CRITIQUE ROUND")

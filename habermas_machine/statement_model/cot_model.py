@@ -205,19 +205,47 @@ Individual Opinions:
   return prompt.strip()
 
 
+def _length_instruction(target_word_count: int | None) -> str:
+  """Builds an explicit length-target clause to append to the prompt.
+
+  The default prompts say "Length follows substance — typically one
+  substantial paragraph". When the caller passes target_word_count, we want
+  to override that with a concrete word target so long-form deliberations
+  produce long-form statements that match the depth of the input opinions.
+  """
+  if target_word_count is None:
+    return ''
+  # The instruction is appended at the end so the model sees it last and
+  # treats it as authoritative over the earlier "typically one paragraph"
+  # guidance. ±20% gives the model room rather than forcing a brittle target.
+  low = int(target_word_count * 0.8)
+  high = int(target_word_count * 1.2)
+  return (
+      "\n\nLENGTH TARGET: Aim for approximately "
+      f"{target_word_count} words in the final consensus statement "
+      f"(roughly {low}-{high} words). The participants' opinions are "
+      "long-form, so the statement should match that depth — develop the "
+      "reasoning, name specifics, and engage substantively with the "
+      "submitted views. Do not pad with filler; if you genuinely cannot "
+      "reach the target without padding, prefer being shorter and tight."
+  )
+
+
 def _generate_prompt(
     question: str,
     opinions: Sequence[str],
     previous_winner: str | None = None,
     critiques: Sequence[str] | None = None,
+    target_word_count: int | None = None,
 ) -> str:
   """Generates a prompt for the LLM."""
   if previous_winner is None:
-    return _generate_opinion_only_prompt(question, opinions)
+    base = _generate_opinion_only_prompt(question, opinions)
   else:
-    return _generate_opinion_critique_prompt(
+    base = _generate_opinion_critique_prompt(
         question, opinions, previous_winner, critiques
     )
+  return base + _length_instruction(target_word_count)
 
 
 def _process_model_response(response: str) -> tuple[str, str]:
@@ -266,6 +294,7 @@ class COTModel(base_model.BaseStatementModel):
       seed: int | None = None,
       override_prompt: str | None = None,
       num_retries_on_error: int = 1,
+      target_word_count: int | None = None,
   ) -> base_model.StatementResult:
     """Generates a statement (see base model)."""
     if num_retries_on_error is None:
@@ -273,7 +302,9 @@ class COTModel(base_model.BaseStatementModel):
     else:
       if num_retries_on_error < 0:
         raise ValueError('num_retries_on_error must be None or at least 0.')
-    prompt = _generate_prompt(question, opinions, previous_winner, critiques)
+    prompt = _generate_prompt(
+        question, opinions, previous_winner, critiques, target_word_count
+    )
     statement, explanation = '', ''  # Dummy result.
     for _ in range(num_retries_on_error):
       response = llm_client.sample_text(

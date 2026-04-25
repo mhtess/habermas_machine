@@ -7,15 +7,17 @@ module produces a rough estimate of:
   - number of LLM calls
   - input + output token volume
   - approximate USD cost range
+  - approximate wall-clock runtime range
 
 The estimate exists so the user can sanity-check the spend before kicking off
 a long, expensive run (e.g. 178 participants ranking 4 long candidate
-statements). It is intentionally conservative and approximate — pricing in the
-table below changes frequently and may be stale.
+statements). It is intentionally conservative and approximate — pricing and
+latency vary day to day and the tables below may be stale.
 """
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -35,6 +37,29 @@ MODEL_PRICING_USD_PER_M = {
 # Conservative fallback if the selected model isn't in the table.
 _FALLBACK_PRICING = {'input': 1.25, 'output': 10.00}
 
+
+# Approximate per-call latency model. Each entry is:
+#   - prefill_tps:  tokens-per-second the model ingests prompt at
+#   - decode_tps:   tokens-per-second the model emits output at
+#   - base_s:       fixed network + queueing overhead per call
+# These are coarse rules of thumb observed in practice; the dialog brackets
+# the estimate with a wide low/high band to absorb the variance.
+MODEL_LATENCY = {
+    'gemini-2.5-flash-lite':  {'prefill_tps': 80000, 'decode_tps': 200, 'base_s': 1.0},
+    'gemini-2.5-flash':       {'prefill_tps': 50000, 'decode_tps': 150, 'base_s': 1.5},
+    'gemini-flash-latest':    {'prefill_tps': 50000, 'decode_tps': 150, 'base_s': 1.5},
+    'gemini-3-flash-preview': {'prefill_tps': 50000, 'decode_tps': 150, 'base_s': 1.5},
+    'gemini-2.5-pro':         {'prefill_tps': 20000, 'decode_tps': 80,  'base_s': 2.0},
+    'gemini-pro-latest':      {'prefill_tps': 20000, 'decode_tps': 80,  'base_s': 2.0},
+    'gemini-3-pro-preview':   {'prefill_tps': 20000, 'decode_tps': 80,  'base_s': 2.0},
+}
+_FALLBACK_LATENCY = {'prefill_tps': 20000, 'decode_tps': 80, 'base_s': 2.0}
+
+# Real-world wall-clock variance is huge — backoff retries, slow days, queue
+# spikes. These factors are wider than the cost band on purpose.
+_RUNTIME_LOW_FACTOR = 0.6
+_RUNTIME_HIGH_FACTOR = 2.5
+
 # Tokenizer approximation: Gemini's tokenizer averages ~4 chars/token for
 # English prose. Off by 10-20% in either direction is fine for a confirmation
 # prompt — we bracket the result with low/high uncertainty bands.
@@ -46,11 +71,16 @@ _CHARS_PER_TOKEN = 4
 _STATEMENT_PROMPT_OVERHEAD_TOKENS = 1800
 _RANKING_PROMPT_OVERHEAD_TOKENS = 1500
 
-# Output budgets. Statements are intentionally long-form (paper-style ~700-1000
-# words including reasoning); ranking responses are mostly the arrow-notation
-# answer plus a short rationale per candidate.
-_STATEMENT_OUTPUT_TOKENS = 2000
+# Output budgets for the *default* (succinct) mode: one substantial
+# paragraph (~200-300 words) plus a short chain-of-thought reasoning block.
+# Long-form output is opt-in via target_word_count and overrides this.
+_STATEMENT_OUTPUT_TOKENS = 900
 _RANKING_OUTPUT_TOKENS = 800
+
+# Default assumed candidate-statement length in the ranking prompt (succinct
+# mode). When target_word_count is set, the ranking prompt scales with it
+# instead.
+_DEFAULT_CANDIDATE_STATEMENT_TOKENS = 450
 
 # Uncertainty band on the final estimate.
 _LOW_FACTOR = 0.7
@@ -59,14 +89,18 @@ _HIGH_FACTOR = 1.4
 
 @dataclass(frozen=True)
 class CostEstimate:
-  """Estimated cost summary for a single deliberation round."""
+  """Estimated cost + runtime summary for a single deliberation round."""
   num_llm_calls: int
   input_tokens: int
   output_tokens: int
   cost_low_usd: float
   cost_mid_usd: float
   cost_high_usd: float
+  runtime_low_s: float
+  runtime_mid_s: float
+  runtime_high_s: float
   pricing_known: bool   # False => model not in pricing table, used fallback
+  latency_known: bool   # False => model not in latency table, used fallback
   is_critique: bool
 
 
@@ -82,6 +116,16 @@ def _sum_tokens(texts: Sequence[str] | None) -> int:
   return sum(_count_tokens(t) for t in texts)
 
 
+def _per_call_latency_s(input_tokens: float, output_tokens: float,
+                        latency: dict) -> float:
+  """Time-to-completion of a single LLM call given prompt/output token counts."""
+  return (
+      latency['base_s']
+      + input_tokens / latency['prefill_tps']
+      + output_tokens / latency['decode_tps']
+  )
+
+
 def estimate_cost(
     *,
     question: str,
@@ -90,7 +134,9 @@ def estimate_cost(
     model_name: str,
     previous_winner: str | None = None,
     critiques: Sequence[str] | None = None,
-    avg_candidate_statement_tokens: int = 1300,
+    avg_candidate_statement_tokens: int = _DEFAULT_CANDIDATE_STATEMENT_TOKENS,
+    max_concurrent_calls: int = 1,
+    target_word_count: int | None = None,
 ) -> CostEstimate:
   """Estimates LLM cost for one mediate() round.
 
@@ -103,11 +149,17 @@ def estimate_cost(
     critiques: Per-participant critiques (critique mode). When provided,
       previous_winner should also be set.
     avg_candidate_statement_tokens: Assumed length of each candidate
-      statement, used for sizing the per-citizen ranking prompt. The default
-      (1300) corresponds to ~700-1000 words.
+      statement, used for sizing the per-citizen ranking prompt. Defaults
+      to a succinct-paragraph length; overridden when target_word_count
+      is set.
+    max_concurrent_calls: Cap on simultaneous LLM calls during the ranking
+      phase. Used only for runtime estimation — has no effect on cost.
+    target_word_count: If set, scales the assumed statement-output length
+      (and the candidate-statement length used for ranking-prompt sizing)
+      so the cost estimate reflects long-form output mode.
 
   Returns:
-    CostEstimate with token counts and a low/mid/high USD range.
+    CostEstimate with token counts, USD range, and wall-clock runtime range.
   """
   is_critique = bool(critiques)
   n = len(opinions)
@@ -118,6 +170,17 @@ def estimate_cost(
   critiques_tok = _sum_tokens(critiques) if is_critique else 0
   avg_opinion_tok = (opinions_tok / n) if n else 0
   avg_critique_tok = (critiques_tok / n) if (is_critique and n) else 0
+
+  # In long-output mode, both the candidate statements themselves and the
+  # output budget grow proportionally to the requested word count. Add ~500
+  # tokens for the chain-of-thought reasoning section that always precedes
+  # the statement.
+  if target_word_count is not None:
+    statement_output_tokens = int(target_word_count * 1.35) + 500
+    candidate_statement_tokens = int(target_word_count * 1.35)
+  else:
+    statement_output_tokens = _STATEMENT_OUTPUT_TOKENS
+    candidate_statement_tokens = avg_candidate_statement_tokens
 
   # Statement-generation prompts include the question + all opinions
   # (+ winner + all critiques in the critique round) + a fixed instruction
@@ -130,7 +193,7 @@ def estimate_cost(
       + _STATEMENT_PROMPT_OVERHEAD_TOKENS
   )
   statement_input_total = num_candidates * per_statement_input
-  statement_output_total = num_candidates * _STATEMENT_OUTPUT_TOKENS
+  statement_output_total = num_candidates * statement_output_tokens
 
   # Per-citizen ranking prompts include the question + that citizen's own
   # opinion + every candidate statement (+ winner + that citizen's critique
@@ -139,7 +202,7 @@ def estimate_cost(
   per_ranking_input = (
       q_tok
       + avg_opinion_tok
-      + num_candidates * avg_candidate_statement_tokens
+      + num_candidates * candidate_statement_tokens
       + (winner_tok + avg_critique_tok if is_critique else 0)
       + _RANKING_PROMPT_OVERHEAD_TOKENS
   )
@@ -159,6 +222,29 @@ def estimate_cost(
       + total_output * pricing['output'] / 1_000_000
   )
 
+  # Wall-clock estimate. Two phases:
+  #   1) Statement generation runs serially in a Python for-loop in
+  #      machine._generate_statements (num_candidates calls back-to-back).
+  #   2) Per-citizen ranking is dispatched to a thread pool capped at
+  #      max_concurrent_calls, so its time is ceil(n / pool) batches of one
+  #      ranking-call latency.
+  latency = MODEL_LATENCY.get(model_name)
+  latency_known = latency is not None
+  if latency is None:
+    latency = _FALLBACK_LATENCY
+
+  per_statement_call_s = _per_call_latency_s(
+      per_statement_input, statement_output_tokens, latency
+  )
+  per_ranking_call_s = _per_call_latency_s(
+      per_ranking_input, _RANKING_OUTPUT_TOKENS, latency
+  )
+  statement_phase_s = num_candidates * per_statement_call_s
+  pool = max(1, max_concurrent_calls)
+  ranking_batches = math.ceil(n / pool) if n > 0 else 0
+  ranking_phase_s = ranking_batches * per_ranking_call_s
+  mid_runtime_s = statement_phase_s + ranking_phase_s
+
   return CostEstimate(
       num_llm_calls=num_candidates + n,
       input_tokens=total_input,
@@ -166,6 +252,10 @@ def estimate_cost(
       cost_low_usd=mid_cost * _LOW_FACTOR,
       cost_mid_usd=mid_cost,
       cost_high_usd=mid_cost * _HIGH_FACTOR,
+      runtime_low_s=mid_runtime_s * _RUNTIME_LOW_FACTOR,
+      runtime_mid_s=mid_runtime_s,
+      runtime_high_s=mid_runtime_s * _RUNTIME_HIGH_FACTOR,
       pricing_known=pricing_known,
+      latency_known=latency_known,
       is_critique=is_critique,
   )

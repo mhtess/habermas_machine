@@ -43,6 +43,7 @@ class BaseStatementModel(abc.ABC):
       critiques: Sequence[str] | None = None,
       seed: int | None = None,
       num_retries_on_error: int = 1,
+      target_word_count: int | None = None,
   ) -> StatementResult:
     """Samples text from the model.
 
@@ -55,6 +56,10 @@ class BaseStatementModel(abc.ABC):
       seed: Optional seed for the sampling. If None a random seed will be used.
       num_retries_on_error: Number of retries when it hits an error. Default is
         1. If it runs out of retries, it returns the last result.
+      target_word_count: If set, instructs the model to aim for roughly this
+        many words in the consensus statement (used to match the depth of
+        long input opinions). If None, the model's default length guidance
+        applies (typically a single substantial paragraph).
 
     Returns:
       A tuple containing:
