@@ -22,20 +22,73 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 
-# Approximate Gemini API pricing in USD per 1M tokens. These figures change
-# regularly; treat the resulting estimate as a ballpark, not a quote.
-# Source: ai.google.dev pricing pages, late 2025.
+# Gemini API pricing in USD per 1M tokens (paid tier, text/image/video).
+# Source: https://ai.google.dev/gemini-api/docs/pricing — last refreshed
+# April 2026. The Pro variants charge a higher rate when the per-call
+# *prompt* exceeds the long_threshold; Flash variants are flat rate.
+#
+# This table is approximate and goes stale fast. Refresh whenever Gemini
+# pricing changes; the dialog tells the user it's a ballpark, not a quote.
 MODEL_PRICING_USD_PER_M = {
-    'gemini-2.5-flash-lite':  {'input': 0.10, 'output': 0.40},
-    'gemini-2.5-flash':       {'input': 0.30, 'output': 2.50},
-    'gemini-flash-latest':    {'input': 0.30, 'output': 2.50},
-    'gemini-3-flash-preview': {'input': 0.30, 'output': 2.50},
-    'gemini-2.5-pro':         {'input': 1.25, 'output': 10.00},
-    'gemini-pro-latest':      {'input': 1.25, 'output': 10.00},
-    'gemini-3-pro-preview':   {'input': 1.25, 'output': 10.00},
+    # Flash-Lite: flat rate, no tier split.
+    'gemini-2.5-flash-lite': {
+        'input': 0.10, 'output': 0.40,
+        'long_input': 0.10, 'long_output': 0.40,
+        'long_threshold': None,
+    },
+    # Flash 2.5: flat rate.
+    'gemini-2.5-flash': {
+        'input': 0.30, 'output': 2.50,
+        'long_input': 0.30, 'long_output': 2.50,
+        'long_threshold': None,
+    },
+    # Flash 3 (preview): flat rate per docs as of April 2026.
+    'gemini-3-flash-preview': {
+        'input': 0.30, 'output': 2.50,
+        'long_input': 0.30, 'long_output': 2.50,
+        'long_threshold': None,
+    },
+    # gemini-flash-latest currently aliases to a Flash variant; pricing is
+    # the same across 2.5 and 3 Flash so this stays right either way.
+    'gemini-flash-latest': {
+        'input': 0.30, 'output': 2.50,
+        'long_input': 0.30, 'long_output': 2.50,
+        'long_threshold': None,
+    },
+    # Pro 2.5: two-tier. Standard tier <=200K, long tier >200K.
+    'gemini-2.5-pro': {
+        'input': 1.25, 'output': 10.00,
+        'long_input': 2.50, 'long_output': 15.00,
+        'long_threshold': 200_000,
+    },
+    # gemini-pro-latest currently aliases to a Pro variant; we model it
+    # with 2.5 Pro pricing (the most likely target). If/when the alias
+    # rolls forward to Gemini 3.x Pro this will undercount somewhat —
+    # consider refreshing.
+    'gemini-pro-latest': {
+        'input': 1.25, 'output': 10.00,
+        'long_input': 2.50, 'long_output': 15.00,
+        'long_threshold': 200_000,
+    },
+    # Pro 3 Preview: two-tier, more expensive than 2.5 Pro.
+    # NOTE: Google deprecated this model on 2026-03-09 in favour of
+    # Gemini 3.1 Pro. Selecting it from the dropdown will fail at the
+    # API; the entry stays for historical estimates only.
+    'gemini-3-pro-preview': {
+        'input': 2.00, 'output': 12.00,
+        'long_input': 4.00, 'long_output': 18.00,
+        'long_threshold': 200_000,
+    },
 }
-# Conservative fallback if the selected model isn't in the table.
-_FALLBACK_PRICING = {'input': 1.25, 'output': 10.00}
+# Conservative fallback if the selected model isn't in the table — uses
+# 3 Pro long-tier rates so estimates skew high rather than low.
+_FALLBACK_PRICING = {
+    'input': 2.00, 'output': 12.00,
+    'long_input': 4.00, 'long_output': 18.00,
+    'long_threshold': 200_000,
+}
+# Stamped into the dialog so users know how stale the table is.
+PRICING_AS_OF = 'April 2026'
 
 
 # Approximate per-call latency model. Each entry is:
@@ -120,6 +173,10 @@ class CostEstimate:
   pricing_known: bool   # False => model not in pricing table, used fallback
   latency_known: bool   # False => model not in latency table, used fallback
   context_window_known: bool          # False => fell back to conservative.
+  long_tier_in_play: bool             # True => any per-call prompt >200K
+                                      #         and the model has a long
+                                      #         tier (i.e. some calls are
+                                      #         charged at the higher rate).
   is_critique: bool
 
   @property
@@ -259,10 +316,35 @@ def estimate_cost(
   if pricing is None:
     pricing = _FALLBACK_PRICING
 
-  mid_cost = (
-      total_input * pricing['input'] / 1_000_000
-      + total_output * pricing['output'] / 1_000_000
+  # Pro models charge a higher rate when the *individual* prompt exceeds
+  # 200K tokens; Flash models are flat. We compute statement-generation
+  # and ranking phases separately because they have very different
+  # per-call sizes (statement-gen ~200K, ranking ~5K), so a single
+  # total-tokens calculation would mis-tier one or the other.
+  def _tier_rates(per_call_input_tokens: float) -> tuple[float, float]:
+    threshold = pricing.get('long_threshold')
+    if threshold is not None and per_call_input_tokens > threshold:
+      return pricing['long_input'], pricing['long_output']
+    return pricing['input'], pricing['output']
+
+  stmt_in_rate, stmt_out_rate = _tier_rates(per_statement_input)
+  rank_in_rate, rank_out_rate = _tier_rates(per_ranking_input)
+  long_tier_in_play = (
+      pricing.get('long_threshold') is not None and (
+          per_statement_input > pricing['long_threshold']
+          or per_ranking_input > pricing['long_threshold']
+      )
   )
+
+  stmt_cost_usd = (
+      statement_input_total * stmt_in_rate
+      + statement_output_total * stmt_out_rate
+  ) / 1_000_000
+  rank_cost_usd = (
+      ranking_input_total * rank_in_rate
+      + ranking_output_total * rank_out_rate
+  ) / 1_000_000
+  mid_cost = stmt_cost_usd + rank_cost_usd
 
   # Wall-clock estimate. Two phases:
   #   1) Statement generation runs serially in a Python for-loop in
@@ -302,5 +384,6 @@ def estimate_cost(
       pricing_known=pricing_known,
       latency_known=latency_known,
       context_window_known=context_window_known,
+      long_tier_in_play=long_tier_in_play,
       is_critique=is_critique,
   )

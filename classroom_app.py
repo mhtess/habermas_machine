@@ -15,7 +15,7 @@ import sys
 import threading
 import time
 import streamlit as st
-from cost_estimation import CostEstimate, estimate_cost
+from cost_estimation import CostEstimate, PRICING_AS_OF, estimate_cost
 from habermas_machine import machine, types
 from habermas_machine.llm_client import aistudio_client
 from habermas_machine.social_choice import utils as sc_utils
@@ -303,10 +303,18 @@ def _render_cost_body(
         )
 
     st.caption(
-        "Rough estimate based on prompt size and Gemini list pricing. "
-        "Actual cost and runtime depend on model behavior, current pricing, "
-        "and API load — treat the ranges as ballparks, not quotes."
+        f"Rough estimate based on prompt size and Gemini list pricing "
+        f"(as of {PRICING_AS_OF}). Actual cost and runtime depend on model "
+        "behavior, current pricing, and API load — treat the ranges as "
+        "ballparks, not quotes."
     )
+    if estimate.long_tier_in_play:
+        st.info(
+            "ℹ️ At least one prompt in this round exceeds the 200K-token "
+            "threshold for the selected model, so those calls are billed "
+            "at the higher long-context rate (about 2× input, 1.5× output). "
+            "The estimate above already accounts for this."
+        )
     if not estimate.pricing_known:
         st.warning(
             "No pricing data on file for the selected model — falling back "
