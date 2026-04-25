@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 import streamlit as st
+from cost_estimation import CostEstimate, estimate_cost
 from habermas_machine import machine, types
 from habermas_machine.llm_client import aistudio_client
 from habermas_machine.social_choice import utils as sc_utils
@@ -163,6 +164,78 @@ if 'sorted_statements' not in st.session_state:
     st.session_state.sorted_statements = None
 if 'hm' not in st.session_state:
     st.session_state.hm = None
+# Pending/confirmed flags for the cost-confirmation dialog. The dialog flow
+# is: button click -> set pending_* -> dialog renders -> Confirm sets
+# confirmed_* -> the run executes on the next rerun.
+if 'pending_opinion_run' not in st.session_state:
+    st.session_state.pending_opinion_run = None
+if 'confirmed_opinion_run' not in st.session_state:
+    st.session_state.confirmed_opinion_run = None
+if 'pending_critique_run' not in st.session_state:
+    st.session_state.pending_critique_run = None
+if 'confirmed_critique_run' not in st.session_state:
+    st.session_state.confirmed_critique_run = None
+
+
+def _render_cost_body(estimate: CostEstimate, num_participants_in_run: int):
+    """Renders the cost summary used inside the confirmation dialog."""
+    st.markdown(
+        f"### Estimated cost: "
+        f"**${estimate.cost_low_usd:.2f} – ${estimate.cost_high_usd:.2f}**"
+    )
+    col_a, col_b, col_c = st.columns(3)
+    col_a.metric("Participants", num_participants_in_run)
+    col_b.metric("LLM calls", f"~{estimate.num_llm_calls}")
+    col_c.metric(
+        "Tokens (in / out)",
+        f"~{estimate.input_tokens // 1000}K / ~{estimate.output_tokens // 1000}K",
+    )
+    st.caption(
+        "Rough estimate based on prompt size and Gemini list pricing. "
+        "Actual cost depends on model behavior and current pricing — "
+        "treat the range as a ballpark, not a quote."
+    )
+    if not estimate.pricing_known:
+        st.warning(
+            "No pricing data on file for the selected model — falling back "
+            "to Gemini Pro list rates, which may overestimate the cost."
+        )
+    if estimate.is_critique:
+        st.info(
+            "Critique rounds re-run the full pipeline with critiques + the "
+            "previous winner added to the prompt, so they're slightly more "
+            "expensive than the opinion round."
+        )
+
+
+@st.dialog("Confirm deliberation cost", width="large")
+def _confirm_opinion_dialog(estimate: CostEstimate, num_participants_in_run: int):
+    _render_cost_body(estimate, num_participants_in_run)
+    col1, col2 = st.columns(2)
+    if col1.button("✅ Confirm and run", type="primary", use_container_width=True,
+                   key="confirm_opinion_btn"):
+        st.session_state.confirmed_opinion_run = True
+        st.session_state.pending_opinion_run = None
+        st.rerun()
+    if col2.button("❌ Cancel", use_container_width=True,
+                   key="cancel_opinion_btn"):
+        st.session_state.pending_opinion_run = None
+        st.rerun()
+
+
+@st.dialog("Confirm critique-round cost", width="large")
+def _confirm_critique_dialog(estimate: CostEstimate, num_participants_in_run: int):
+    _render_cost_body(estimate, num_participants_in_run)
+    col1, col2 = st.columns(2)
+    if col1.button("✅ Confirm and run", type="primary", use_container_width=True,
+                   key="confirm_critique_btn"):
+        st.session_state.confirmed_critique_run = True
+        st.session_state.pending_critique_run = None
+        st.rerun()
+    if col2.button("❌ Cancel", use_container_width=True,
+                   key="cancel_critique_btn"):
+        st.session_state.pending_critique_run = None
+        st.rerun()
 
 # Question input
 question = st.text_area(
@@ -324,17 +397,45 @@ for i in range(num_participants):
 
 st.divider()
 
-# Run opinion round
-if st.button("🚀 Run Opinion Round", type="primary", use_container_width=True):
-    # Validate inputs
+# Run opinion round (gated behind a cost-estimate confirmation dialog).
+opinion_btn_clicked = st.button(
+    "🚀 Run Opinion Round", type="primary", use_container_width=True
+)
+
+if opinion_btn_clicked:
+    # Validate before opening the dialog so we don't spend a click on
+    # something that's going to fail validation anyway.
     if not question.strip():
         st.error("Please enter a discussion question.")
-        st.stop()
+    else:
+        _valid_opinions = [
+            op.strip() for op in st.session_state.opinions if op.strip()
+        ]
+        if len(_valid_opinions) < 2:
+            st.error("Please enter at least 2 participant opinions.")
+        else:
+            _estimate = estimate_cost(
+                question=question,
+                opinions=_valid_opinions,
+                num_candidates=num_candidates,
+                model_name=model_name,
+            )
+            st.session_state.pending_opinion_run = {
+                'estimate': _estimate,
+                'num_participants_in_run': len(_valid_opinions),
+            }
 
-    valid_opinions = [op.strip() for op in st.session_state.opinions if op.strip()]
-    if len(valid_opinions) < 2:
-        st.error("Please enter at least 2 participant opinions.")
-        st.stop()
+if st.session_state.pending_opinion_run is not None:
+    _pending = st.session_state.pending_opinion_run
+    _confirm_opinion_dialog(
+        _pending['estimate'], _pending['num_participants_in_run']
+    )
+
+if st.session_state.confirmed_opinion_run:
+    st.session_state.confirmed_opinion_run = None
+    valid_opinions = [
+        op.strip() for op in st.session_state.opinions if op.strip()
+    ]
 
     # Initialize Habermas Machine
     with st.spinner("Initializing Habermas Machine..."):
@@ -565,13 +666,47 @@ if st.session_state.winner:
         if f"critique_{i}" in st.session_state:
             st.session_state.critiques[i] = st.session_state[f"critique_{i}"]
 
-    # Run critique round
-    if st.button("🔄 Run Critique Round", type="secondary", use_container_width=True):
-        valid_critiques = [c.strip() for c in st.session_state.critiques if c.strip()]
+    # Run critique round (gated behind a cost-estimate confirmation dialog).
+    critique_btn_clicked = st.button(
+        "🔄 Run Critique Round", type="secondary", use_container_width=True
+    )
 
-        if len(valid_critiques) < 2:
-            st.error("Please enter at least 2 critiques to run the critique round.")
-            st.stop()
+    if critique_btn_clicked:
+        _valid_critiques = [
+            c.strip() for c in st.session_state.critiques if c.strip()
+        ]
+        if len(_valid_critiques) < 2:
+            st.error(
+                "Please enter at least 2 critiques to run the critique round."
+            )
+        else:
+            _valid_opinions_for_estimate = [
+                op.strip() for op in st.session_state.opinions if op.strip()
+            ]
+            _estimate = estimate_cost(
+                question=question,
+                opinions=_valid_opinions_for_estimate,
+                num_candidates=num_candidates,
+                model_name=model_name,
+                previous_winner=st.session_state.winner,
+                critiques=_valid_critiques,
+            )
+            st.session_state.pending_critique_run = {
+                'estimate': _estimate,
+                'num_participants_in_run': len(_valid_critiques),
+            }
+
+    if st.session_state.pending_critique_run is not None:
+        _pending = st.session_state.pending_critique_run
+        _confirm_critique_dialog(
+            _pending['estimate'], _pending['num_participants_in_run']
+        )
+
+    if st.session_state.confirmed_critique_run:
+        st.session_state.confirmed_critique_run = None
+        valid_critiques = [
+            c.strip() for c in st.session_state.critiques if c.strip()
+        ]
 
         print("\n" + "="*80)
         print(f"STARTING CRITIQUE ROUND")
