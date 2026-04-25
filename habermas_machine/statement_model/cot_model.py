@@ -355,7 +355,14 @@ def _process_model_response(response: str) -> tuple[str, str]:
     if statement:
       return statement, explanation
 
-  return '', 'INCORRECT_TEMPLATE'
+  # No parser matched — return a truncated snippet of the raw response in
+  # the explanation so callers can tell at a glance whether the problem is
+  # an empty response (e.g. max_tokens exhausted on thinking), a safety
+  # filter, or genuine format drift.
+  if not response:
+    return '', 'INCORRECT_TEMPLATE: <empty response from model>'
+  snippet = response[:200].replace('\n', ' ⏎ ')
+  return '', f'INCORRECT_TEMPLATE: {snippet!r}'
 
 
 class COTModel(base_model.BaseStatementModel):
@@ -384,8 +391,14 @@ class COTModel(base_model.BaseStatementModel):
     )
     statement, explanation = '', ''  # Dummy result.
     for _ in range(num_retries_on_error):
+      # max_tokens=16384 — Gemini 2.5/3 thinking models burn output-token
+      # budget on internal reasoning before producing visible text. The
+      # default 4096 is enough for a 250-word paragraph but gets entirely
+      # consumed by thinking on long-context calls, leaving zero visible
+      # output. 16384 gives ~8K thinking + ~8K visible output, which
+      # comfortably covers even the long-form (target_word_count) mode.
       response = llm_client.sample_text(
-          prompt, terminators=[], seed=seed)
+          prompt, terminators=[], seed=seed, max_tokens=16384)
 
       statement, explanation = _process_model_response(response)
       if len(statement) > 5 and 'INCORRECT' not in explanation:

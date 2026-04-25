@@ -123,7 +123,9 @@ class COTModelTest(parameterized.TestCase):
     response = "This is just some text."
     statement, explanation = cot_model._process_model_response(response)
     self.assertEqual(statement, "")
-    self.assertEqual(explanation, "INCORRECT_TEMPLATE")
+    # Explanation now includes a snippet of the response for debugging.
+    self.assertStartsWith(explanation, "INCORRECT_TEMPLATE")
+    self.assertIn("just some text", explanation)
 
   def test_process_model_response_canonical_markdown(self):
     """The default ## Reasoning: / ## Draft Consensus Statement: format."""
@@ -192,7 +194,15 @@ class COTModelTest(parameterized.TestCase):
     )
     statement, explanation = cot_model._process_model_response(response)
     self.assertEqual(statement, "")
-    self.assertEqual(explanation, "INCORRECT_TEMPLATE")
+    self.assertStartsWith(explanation, "INCORRECT_TEMPLATE")
+
+  def test_process_model_response_empty_response_diagnostic(self):
+    """Empty model response (e.g. max_tokens exhausted) is flagged distinctly."""
+    statement, explanation = cot_model._process_model_response("")
+    self.assertEqual(statement, "")
+    self.assertEqual(
+        explanation, "INCORRECT_TEMPLATE: <empty response from model>"
+    )
 
   def test_generate_statement(self):
     """Tests the generate_statement method."""
