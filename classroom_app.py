@@ -703,6 +703,18 @@ if st.session_state.confirmed_opinion_run:
                 "participants."
             )
 
+        # Same for candidate statements — empty/unparseable ones are filtered
+        # out before ranking. Worth flagging because at high drop rates the
+        # ranking signal degrades even if the run completes.
+        if hm.last_round_dropped_candidates:
+            st.warning(
+                f"⚠️ {hm.last_round_dropped_candidates} of {num_candidates} "
+                "candidate statements came back empty or unparseable from "
+                "the statement model and were dropped before ranking. "
+                "If this happens repeatedly, try fewer candidates, a "
+                "shorter context, or a more capable model."
+            )
+
     except Exception as e:
         st.error(f"Error running deliberation: {str(e)}")
         st.exception(e)
@@ -970,6 +982,16 @@ if st.session_state.winner:
                         f"ranking after retries (citizens {dropped}). The "
                         "refined statement above reflects the remaining "
                         f"{len(valid_critiques) - len(dropped)} participants."
+                    )
+
+                if hm.last_round_dropped_candidates:
+                    st.warning(
+                        f"⚠️ {hm.last_round_dropped_candidates} of "
+                        f"{num_candidates} refined statements came back "
+                        "empty or unparseable from the statement model "
+                        "and were dropped before ranking. If this happens "
+                        "repeatedly, try fewer candidates, a shorter "
+                        "context, or a more capable model."
                     )
 
                 with st.expander("📋 View All Refined Statements (Ranked)"):

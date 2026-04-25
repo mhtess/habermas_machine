@@ -112,6 +112,10 @@ class HabermasMachine:
     # Citizens whose ranking call failed (after retries) in the most recent
     # mediate() call — exposed via the property below so callers can warn.
     self._last_round_dropped_citizens: list[int] = []
+    # Number of candidate statements that came back empty/unparseable in
+    # the most recent _generate_statements() call. Surfaced to the UI so
+    # users can tell when generation is degrading even if the run finishes.
+    self._last_round_dropped_candidates: int = 0
 
   def _get_new_seed(self):
     """Generates a new random seed."""
@@ -129,12 +133,32 @@ class HabermasMachine:
     """
     return list(self._last_round_dropped_citizens)
 
+  @property
+  def last_round_dropped_candidates(self) -> int:
+    """Number of candidate statements that came back empty in the last round.
+
+    A candidate is "dropped" when the statement model returns an empty or
+    unparseable result after exhausting retries — typically because the
+    LLM produced output that didn't match the expected format. Empty
+    candidates are filtered out before ranking so they don't poison the
+    social-choice aggregation.
+    """
+    return self._last_round_dropped_candidates
+
   def _generate_statements(
       self,
   ) -> tuple[list[str], list[str]]:  # statements, explanations.
-    """Generates candidate statements."""
+    """Generates candidate statements.
+
+    Empty / unparseable candidates (statement model exhausted retries) are
+    dropped here rather than passed downstream — feeding empty strings to
+    the ranker confuses both the LLM and the Schulze aggregation, and an
+    empty winner is the worst possible UX. We require at least 2 valid
+    candidates for ranking; if we get fewer, raise so the caller knows.
+    """
     statements = []
     explanations = []
+    dropped = 0
     for _ in range(self._num_candidates):
       # Shuffle the opinions and critiques to avoid ordering bias.
       indices = self._rng.permutation(self._num_citizens)
@@ -153,8 +177,31 @@ class HabermasMachine:
           num_retries_on_error=self._num_retries_on_error,
           target_word_count=self._target_word_count,
       )
+      # Drop empty outputs. The retry loop inside generate_statement
+      # already swallows transient parse failures; if we still have nothing
+      # after retries, this candidate is unrecoverable. We use a strict
+      # "non-empty after strip" check rather than a length threshold so
+      # legitimately short answers from custom statement models still pass.
+      if not statement or not statement.strip():
+        dropped += 1
+        if self._verbose:
+          print(
+              f'Dropping empty/short candidate statement '
+              f'(explanation: {explanation!r}).'
+          )
+        continue
       statements.append(statement)
       explanations.append(explanation)
+
+    self._last_round_dropped_candidates = dropped
+
+    if len(statements) < 2:
+      raise ValueError(
+          f'Statement model produced too few valid candidates: '
+          f'{len(statements)} valid out of {self._num_candidates} requested '
+          f'({dropped} dropped as empty/unparseable). Check the statement '
+          f'model prompt or try a different model.'
+      )
     return statements, explanations
 
   def _get_rankings(
@@ -166,10 +213,14 @@ class HabermasMachine:
     (permutation + seed) happen serially before dispatch so outputs are
     deterministic for a given seed regardless of max_workers.
     """
+    # Use the actual statement count, not self._num_candidates — empty
+    # statements are dropped in _generate_statements so the live list may
+    # be shorter than the configured candidate count.
+    num_statements = len(statements)
     # Pre-compute per-citizen inputs serially — keeps RNG draws deterministic.
     tasks = []
     for i in range(self._num_citizens):
-      indices = self._rng.permutation(self._num_candidates)
+      indices = self._rng.permutation(num_statements)
       shuffled_statements = [statements[j] for j in indices]
       seed = self._get_new_seed()
       tasks.append((i, indices, shuffled_statements, seed))

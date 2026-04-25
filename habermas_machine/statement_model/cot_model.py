@@ -92,6 +92,14 @@ In general, free childcare is a good thing, but it is important to consider how 
 
 It is CRITICAL to follow this format. Always include the "## Reasoning:" section followed by your explanation, then the "## Revised Consensus Statement:" section with ONLY the statement. The final statement must NOT contain any references like "(Opinion 1)" or "(Critique 2)".
 
+================================================================================
+END OF FORMAT EXAMPLES. The example above (childcare) is for FORMAT REFERENCE
+ONLY — do NOT copy phrases, topics, specific details, or any content from it.
+Your statement MUST address the actual question below using the actual opinions
+and critiques provided. If you find yourself echoing words like "childcare",
+"parental leave", "6 months", or "irrespective of gender", you are copying
+the example — STOP and rewrite from scratch using the actual inputs below.
+================================================================================
 
 Below you will find the question, the individual opinions, the previous draft consensus statement, and the critiques provided by the participants.
 
@@ -191,6 +199,14 @@ The government should spend more on improving the rail network. This is to encou
 
 It is CRITICAL to follow this format. Always include the "## Reasoning:" section followed by your explanation, then the "## Draft Consensus Statement:" section with ONLY the statement. The final statement must NOT contain any references like "(Opinion 1)" or "(Opinions 2, 3)".
 
+================================================================================
+END OF FORMAT EXAMPLES. The examples above (childcare, rail) are for FORMAT
+REFERENCE ONLY — do NOT copy phrases, topics, specific details, or any content
+from them. Your statement MUST address the actual question below using the
+actual opinions provided. If you find yourself echoing words like "childcare",
+"parental leave", "6 months", "rail network", or "HS2", you are copying the
+example — STOP and rewrite from scratch using the actual inputs below.
+================================================================================
 
 Below you will find the question and the individual opinions of the participants.
 
@@ -255,10 +271,10 @@ def _process_model_response(response: str) -> tuple[str, str]:
       response: The raw model response.
 
   Returns:
-      A tuple of (statement, explanation).  If the response format is
+      A tuple of (statement, explanation). If the response format is
       incorrect, returns ("", "INCORRECT_TEMPLATE").
   """
-  # Try new markdown format first (either "Draft" or "Revised" Consensus Statement)
+  # Try the canonical markdown format first (## headers with colons).
   match = re.search(
       r'##\s*Reasoning:\s*(.*?)##\s*(?:Draft|Revised)\s+Consensus Statement:\s*(.*?)(?:\n##|$)',
       response,
@@ -267,16 +283,41 @@ def _process_model_response(response: str) -> tuple[str, str]:
   if match:
     explanation = match.group(1).strip()
     statement = match.group(2).strip()
-    return statement, explanation
+    if statement:
+      return statement, explanation
 
-  # Fall back to old XML-like format for backward compatibility
+  # Forgiving fallback: header markup the model sometimes drifts to —
+  # bold (**Reasoning**), missing colons, "Final" instead of "Draft" /
+  # "Revised", or an extra blank "##" line. We just need to find the
+  # boundary between the reasoning block and the statement block.
+  flexible_pattern = (
+      r'(?:^|\n)\s*'
+      r'(?:#{1,3}\s*|\*\*\s*)?'
+      r'Reasoning\s*[:\*]*\s*'
+      r'(?:#{0,3}\s*|\*\*)?\s*'
+      r'(.*?)'
+      r'(?:^|\n)\s*'
+      r'(?:#{1,3}\s*|\*\*\s*)?'
+      r'(?:Draft|Revised|Final)?\s*Consensus\s+Statement\s*[:\*]*\s*'
+      r'(?:#{0,3}\s*|\*\*)?\s*'
+      r'(.*?)(?:\n##|\n\*\*[A-Z]|$)'
+  )
+  match = re.search(flexible_pattern, response, re.DOTALL | re.IGNORECASE | re.MULTILINE)
+  if match:
+    explanation = match.group(1).strip()
+    statement = match.group(2).strip()
+    if statement:
+      return statement, explanation
+
+  # Fall back to old XML-like format for backward compatibility.
   match = re.search(
       r'<answer>\s*(.*?)\s*<sep>\s*(.*?)\s*</answer>', response, re.DOTALL
   )
   if match:
     explanation = match.group(1).strip()
     statement = match.group(2).strip()
-    return statement, explanation
+    if statement:
+      return statement, explanation
 
   return '', 'INCORRECT_TEMPLATE'
 

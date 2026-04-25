@@ -125,6 +125,50 @@ class COTModelTest(parameterized.TestCase):
     self.assertEqual(statement, "")
     self.assertEqual(explanation, "INCORRECT_TEMPLATE")
 
+  def test_process_model_response_canonical_markdown(self):
+    """The default ## Reasoning: / ## Draft Consensus Statement: format."""
+    response = (
+        "## Reasoning:\n"
+        "Some reasoning here.\n"
+        "## Draft Consensus Statement:\n"
+        "We believe X."
+    )
+    statement, explanation = cot_model._process_model_response(response)
+    self.assertEqual(statement, "We believe X.")
+    self.assertEqual(explanation, "Some reasoning here.")
+
+  @parameterized.named_parameters(
+      ("bold_no_colon",
+       "**Reasoning**\nThe reasoning is sound.\n\n"
+       "**Draft Consensus Statement**\nWe support the proposal."),
+      ("h3_with_colon",
+       "### Reasoning:\nA detailed analysis.\n\n"
+       "### Draft Consensus Statement:\nWe support the proposal."),
+      ("revised_variant",
+       "## Reasoning:\nWe revisited the draft.\n\n"
+       "## Revised Consensus Statement:\nWe support the proposal."),
+      ("final_variant",
+       "## Reasoning:\nWe revisited the draft.\n\n"
+       "## Final Consensus Statement:\nWe support the proposal."),
+  )
+  def test_process_model_response_forgives_format_drift(self, response):
+    """Common format-drift variants should still parse, not return empty."""
+    statement, explanation = cot_model._process_model_response(response)
+    self.assertEqual(statement, "We support the proposal.")
+    self.assertNotEmpty(explanation)
+    self.assertNotIn("INCORRECT", explanation)
+
+  def test_process_model_response_rejects_empty_statement(self):
+    """A header with no content under it must NOT pass as a valid statement."""
+    response = (
+        "## Reasoning:\nLots of reasoning.\n"
+        "## Draft Consensus Statement:\n"
+        # Empty body — no statement.
+    )
+    statement, explanation = cot_model._process_model_response(response)
+    self.assertEqual(statement, "")
+    self.assertEqual(explanation, "INCORRECT_TEMPLATE")
+
   def test_generate_statement(self):
     """Tests the generate_statement method."""
 

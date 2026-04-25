@@ -24,6 +24,45 @@ from habermas_machine import types
 from habermas_machine.llm_client import base_client
 from habermas_machine.reward_model import base_model as reward_base
 from habermas_machine.social_choice import utils as sc_utils
+from habermas_machine.statement_model import base_model as statement_base
+
+
+class _PartiallyFailingStatementModel(statement_base.BaseStatementModel):
+  """Test statement model that returns empty for the first `num_empty` calls.
+
+  Used to exercise the drop-empty-candidates path in
+  HabermasMachine._generate_statements.
+  """
+
+  def __init__(self, num_empty: int, num_citizens: int):
+    self._num_empty = num_empty
+    self._calls = 0
+    self._num_citizens = num_citizens
+
+  def generate_statement(
+      self,
+      llm_client: base_client.LLMClient,
+      question: str,
+      opinions: Sequence[str],
+      previous_winner: str | None = None,
+      critiques: Sequence[str] | None = None,
+      seed: int | None = None,
+      num_retries_on_error: int = 1,
+      target_word_count: int | None = None,
+  ) -> statement_base.StatementResult:
+    del (llm_client, previous_winner, critiques, seed,
+         num_retries_on_error, target_word_count)
+    self._calls += 1
+    if self._calls <= self._num_empty:
+      return statement_base.StatementResult(
+          statement='',
+          explanation='INCORRECT_TEMPLATE (synthetic)',
+      )
+    # A non-empty statement that's long enough to clear the >20-char gate.
+    return statement_base.StatementResult(
+        statement=f'Statement {self._calls} for {question}: {opinions[0]}',
+        explanation=f'ok ({self._calls})',
+    )
 
 
 class _FailingRankingModel(reward_base.BaseRankingModel):
@@ -274,6 +313,51 @@ class HabermasMachineTest(parameterized.TestCase):
     critiques = ['c_a', 'c_b', 'c_c', 'c_d', 'c_e']
     hm.mediate(critiques)
     self.assertEqual(hm.last_round_dropped_citizens, [])
+
+  def _build_with_partial_statement_failures(
+      self, num_empty: int, num_candidates: int = 4, num_citizens: int = 3
+  ) -> machine.HabermasMachine:
+    return machine.HabermasMachine(
+        question='Q?',
+        statement_client=types.LLMCLient.MOCK.get_client('mock_url'),
+        reward_client=types.LLMCLient.MOCK.get_client('mock_url'),
+        statement_model=_PartiallyFailingStatementModel(
+            num_empty=num_empty, num_citizens=num_citizens
+        ),
+        reward_model=types.RewardModel.MOCK.get_model(),
+        social_choice_method=types.RankAggregation.SCHULZE.get_method(
+            tie_breaking_method=sc_utils.TieBreakingMethod.TIES_ALLOWED
+        ),
+        num_candidates=num_candidates,
+        num_citizens=num_citizens,
+        seed=0,
+    )
+
+  def test_empty_candidates_dropped_not_passed_to_ranker(self):
+    """Empty candidate statements should be filtered before ranking."""
+    # Generate 4 candidates, first 2 come back empty.
+    hm = self._build_with_partial_statement_failures(
+        num_empty=2, num_candidates=4
+    )
+    winner, sorted_statements = hm.mediate(['op_a', 'op_b', 'op_c'])
+
+    # The winner must be a non-empty statement.
+    self.assertNotEmpty(winner)
+    # The candidate list passed downstream is the surviving 2, not 4.
+    self.assertLen(sorted_statements, 2)
+    for stmt in sorted_statements:
+      self.assertNotEmpty(stmt)
+    # And the property reports the count.
+    self.assertEqual(hm.last_round_dropped_candidates, 2)
+
+  def test_too_few_valid_candidates_raises(self):
+    """If <2 valid candidates remain, raise — Schulze needs at least 2."""
+    # Generate 4 candidates, first 3 come back empty -> only 1 valid.
+    hm = self._build_with_partial_statement_failures(
+        num_empty=3, num_candidates=4
+    )
+    with self.assertRaisesRegex(ValueError, 'too few valid candidates'):
+      hm.mediate(['op_a', 'op_b', 'op_c'])
 
 
 if __name__ == '__main__':
