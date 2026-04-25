@@ -189,6 +189,17 @@ if 'sorted_statements' not in st.session_state:
     st.session_state.sorted_statements = None
 if 'hm' not in st.session_state:
     st.session_state.hm = None
+# Version counters bumped whenever opinions/critiques are bulk-replaced
+# (e.g. by a Sheets import). These get baked into widget `key=` values
+# below so the widgets re-instantiate from the new source data instead
+# of trying to reuse stale per-widget session_state. This is the
+# Streamlit-idiomatic way to force a widget reset — programmatically
+# pre-populating widget keys for unrendered widgets isn't reliable
+# across reruns.
+if 'opinion_version' not in st.session_state:
+    st.session_state.opinion_version = 0
+if 'critique_version' not in st.session_state:
+    st.session_state.critique_version = 0
 # Pending/confirmed flags for the cost-confirmation dialog. The dialog flow
 # is: button click -> set pending_* -> dialog renders -> Confirm sets
 # confirmed_* -> the run executes on the next rerun.
@@ -372,28 +383,15 @@ if SHEETS_AVAILABLE:
                         if not imported_opinions:
                             st.error("No opinions found in the sheet. Check the column letter and row numbers.")
                         else:
-                            # Drop any stale per-widget state from a previous
-                            # session before swapping in the new list.
-                            # Pre-populating st.session_state[f"opinion_{i}"]
-                            # here for unrendered widgets is unreliable —
-                            # only the page-1 widgets actually claim their
-                            # keys on the next rerun, and pages 2+ end up
-                            # blank. The seed loop further down rebuilds
-                            # these keys from the opinions list on the next
-                            # rerun, once each widget actually mounts.
-                            for _stale_key in [
-                                k for k in st.session_state.keys()
-                                if isinstance(k, str) and k.startswith("opinion_")
-                                and k != "opinion_page"
-                            ]:
-                                del st.session_state[_stale_key]
-
-                            # Update session state with imported data — this
-                            # is the canonical source of truth that the seed
-                            # loop reads from.
+                            # Bump the version so every text_area below gets
+                            # a fresh key and re-instantiates from
+                            # opinions[i] via value= — without this, page 2+
+                            # widgets would otherwise either reuse stale
+                            # widget state or fail to pick up the imported
+                            # text at all.
+                            st.session_state.opinion_version += 1
                             st.session_state.opinions = imported_opinions
 
-                            # Also update the question if found
                             if imported_question and imported_question != 'nan':
                                 st.session_state.imported_question = imported_question
 
@@ -401,7 +399,6 @@ if SHEETS_AVAILABLE:
                             if imported_question:
                                 st.info(f"💡 Detected question: {imported_question[:100]}...")
 
-                            # Force a rerun to show the imported data
                             st.rerun()
 
                 except Exception as e:
@@ -448,15 +445,12 @@ elif num_participants < len(st.session_state.opinions):
     st.session_state.opinions = st.session_state.opinions[:num_participants]
 
 # Opinion input fields. We paginate above ~25 participants so Streamlit
-# doesn't have to re-render hundreds of text areas on every interaction —
-# session_state persists widget values for all participants regardless of
-# which page is currently visible.
+# doesn't have to re-render hundreds of text areas on every interaction.
+# Each text_area uses a key that bakes in opinion_version, so a Sheets
+# import (which bumps the version) forces every widget across every page
+# to re-instantiate with value=opinions[i] instead of trying to reuse
+# stale per-widget session_state — which is the bug pages 2+ hit otherwise.
 OPINION_PAGE_SIZE = 25
-
-# Seed widget state for every participant so unrendered pages keep their data.
-for i in range(num_participants):
-    if f"opinion_{i}" not in st.session_state:
-        st.session_state[f"opinion_{i}"] = st.session_state.opinions[i]
 
 if num_participants > OPINION_PAGE_SIZE:
     num_pages = (num_participants - 1) // OPINION_PAGE_SIZE + 1
@@ -476,19 +470,18 @@ if num_participants > OPINION_PAGE_SIZE:
 else:
     start_idx, end_idx = 0, num_participants
 
+_op_version = st.session_state.opinion_version
 for i in range(start_idx, end_idx):
+    _key = f"opinion_v{_op_version}_{i}"
     st.text_area(
         f"Participant {i + 1}",
+        value=st.session_state.opinions[i],
         height=120,
-        key=f"opinion_{i}",
+        key=_key,
     )
-
-# Sync widget state back to the opinions list for ALL participants — not
-# just the visible page — so the canonical list stays in sync as the user
-# pages through.
-for i in range(num_participants):
-    if f"opinion_{i}" in st.session_state:
-        st.session_state.opinions[i] = st.session_state[f"opinion_{i}"]
+    # Sync the widget's current value (which may be the user's edits since
+    # the last rerun) back into the canonical opinions list immediately.
+    st.session_state.opinions[i] = st.session_state[_key]
 
 st.divider()
 
@@ -703,25 +696,14 @@ if st.session_state.winner:
                             if not imported_critiques:
                                 st.error("No critiques found in the sheet. Check the column letter.")
                             else:
-                                # Same gotcha as the opinion import path —
-                                # pre-populating per-widget state for
-                                # unrendered widgets is unreliable, so drop
-                                # stale critique_* keys and let the seed
-                                # loop rebuild them from the critiques list.
-                                for _stale_key in [
-                                    k for k in st.session_state.keys()
-                                    if isinstance(k, str)
-                                    and k.startswith("critique_")
-                                    and k != "critique_page"
-                                ]:
-                                    del st.session_state[_stale_key]
-
-                                # Update session state with imported critiques.
+                                # Bump the version so every critique
+                                # text_area below gets a fresh key — same
+                                # rationale as the opinion import path.
+                                st.session_state.critique_version += 1
                                 st.session_state.critiques = imported_critiques
 
                                 st.success(f"✅ Imported {len(imported_critiques)} critiques from Google Sheets!")
 
-                                # Force a rerun to show the imported data
                                 st.rerun()
 
                     except Exception as e:
@@ -733,7 +715,9 @@ if st.session_state.winner:
                         """)
 
     # Critique inputs. Number of critique boxes mirrors the number of
-    # non-empty opinions; paginate the same way as the opinion section.
+    # non-empty opinions; paginate the same way as the opinion section,
+    # using critique_version-keyed widgets so a Sheets import reliably
+    # repopulates every page (not just page 1).
     num_critique_boxes = len(
         [op for op in st.session_state.opinions if op.strip()]
     )
@@ -745,11 +729,6 @@ if st.session_state.winner:
         )
 
     CRITIQUE_PAGE_SIZE = 25
-
-    # Seed widget state so off-page critiques are preserved.
-    for i in range(num_critique_boxes):
-        if f"critique_{i}" not in st.session_state:
-            st.session_state[f"critique_{i}"] = st.session_state.critiques[i]
 
     if num_critique_boxes > CRITIQUE_PAGE_SIZE:
         c_num_pages = (num_critique_boxes - 1) // CRITIQUE_PAGE_SIZE + 1
@@ -769,17 +748,16 @@ if st.session_state.winner:
     else:
         c_start, c_end = 0, num_critique_boxes
 
+    _crit_version = st.session_state.critique_version
     for i in range(c_start, c_end):
+        _key = f"critique_v{_crit_version}_{i}"
         st.text_area(
             f"Critique from Participant {i + 1}",
+            value=st.session_state.critiques[i],
             height=80,
-            key=f"critique_{i}",
+            key=_key,
         )
-
-    # Sync widget state back into the critiques list for every participant.
-    for i in range(num_critique_boxes):
-        if f"critique_{i}" in st.session_state:
-            st.session_state.critiques[i] = st.session_state[f"critique_{i}"]
+        st.session_state.critiques[i] = st.session_state[_key]
 
     # Run critique round (gated behind a cost-estimate confirmation dialog).
     critique_btn_clicked = st.button(
