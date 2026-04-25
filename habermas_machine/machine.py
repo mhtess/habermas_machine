@@ -109,10 +109,25 @@ class HabermasMachine:
       raise ValueError(f'max_workers must be >= 1, got {max_workers}.')
     self._max_workers = max_workers
     self._target_word_count = target_word_count
+    # Citizens whose ranking call failed (after retries) in the most recent
+    # mediate() call — exposed via the property below so callers can warn.
+    self._last_round_dropped_citizens: list[int] = []
 
   def _get_new_seed(self):
     """Generates a new random seed."""
     return self._rng.integers(np.iinfo(np.int32).max)
+
+  @property
+  def last_round_dropped_citizens(self) -> list[int]:
+    """1-indexed citizen numbers whose ranking failed in the last round.
+
+    A citizen is "dropped" when the reward model fails to produce a
+    parseable ranking after exhausting retries — typically because the
+    LLM returned a partial ordering (e.g. "A > B" when 4 candidates
+    were expected). Their row is excluded from social-choice aggregation
+    rather than failing the entire round.
+    """
+    return list(self._last_round_dropped_citizens)
 
   def _generate_statements(
       self,
@@ -190,17 +205,47 @@ class HabermasMachine:
         i, ranking, explanation = run_one(task)
         results[i] = (i, ranking, explanation)
 
+    # Salvage: if the reward model exhausted its retries for a given
+    # citizen (typically because the LLM produced a partial ranking like
+    # "A > B" when 4 candidates were expected), drop that citizen from
+    # aggregation rather than failing the entire round. Losing a few rows
+    # out of N is fine for Schulze; losing the run after several minutes
+    # of LLM work is not.
     all_rankings = []
     explanations = []
+    dropped_citizens: list[int] = []
     for i, (_, ranking, explanation) in enumerate(results):
       if ranking is None:
-        raise ValueError(
-            f"Ranking is None for citizen {i+1}. Explanation: {explanation}")
+        dropped_citizens.append(i + 1)  # 1-indexed for user-facing logs.
+        if self._verbose:
+          print(
+              f"Dropping citizen {i + 1} from ranking aggregation — "
+              f"reward model failed after retries. Explanation: "
+              f"{explanation}"
+          )
+        continue
       indices = tasks[i][1]
       unshuffled_ranking = np.full_like(ranking, fill_value=types.RANKING_MOCK)
       unshuffled_ranking[indices] = ranking
       all_rankings.append(unshuffled_ranking)
       explanations.append(explanation)
+
+    # Stash for the public property so the UI can warn the user.
+    self._last_round_dropped_citizens = dropped_citizens
+
+    # If too few rankings remain to aggregate meaningfully, fail loudly.
+    # Threshold: at least 2 rankings (the social-choice minimum) AND a
+    # strict majority of the original citizens — anything less and the
+    # result isn't representative of the group.
+    min_required = max(2, (self._num_citizens + 1) // 2)
+    if len(all_rankings) < min_required:
+      raise ValueError(
+          f"Too many citizens failed to produce valid rankings: "
+          f"{len(dropped_citizens)} of {self._num_citizens} dropped "
+          f"(need at least {min_required} valid). Check the reward-model "
+          f"prompt or try a different model."
+      )
+
     return np.array(all_rankings), explanations
 
   def overwrite_previous_winner(self, winner: str):

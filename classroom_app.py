@@ -688,6 +688,21 @@ if st.session_state.confirmed_opinion_run:
             status.write("✅ Rankings computed")
             status.update(label="✅ Deliberation complete!", state="complete")
 
+        # If the reward model couldn't get a parseable ranking out of some
+        # citizens (typically the LLM returning a partial ordering even
+        # after retries), surface them outside the status block. Their
+        # rows were dropped from aggregation rather than failing the run.
+        dropped = hm.last_round_dropped_citizens
+        if dropped:
+            st.warning(
+                f"⚠️ {len(dropped)} of {len(valid_opinions)} participants "
+                "were dropped from ranking aggregation because the reward "
+                "model couldn't return a complete ranking after retries "
+                f"(citizens {dropped}). The consensus statement above "
+                f"reflects the remaining {len(valid_opinions) - len(dropped)} "
+                "participants."
+            )
+
     except Exception as e:
         st.error(f"Error running deliberation: {str(e)}")
         st.exception(e)
@@ -944,6 +959,18 @@ if st.session_state.winner:
 
                 st.markdown("### 🏆 Refined Consensus Statement")
                 st.success(winner)
+
+                # Same drop warning as the opinion round.
+                dropped = hm.last_round_dropped_citizens
+                if dropped:
+                    st.warning(
+                        f"⚠️ {len(dropped)} of {len(valid_critiques)} "
+                        "participants were dropped from ranking aggregation "
+                        "because the reward model couldn't return a complete "
+                        f"ranking after retries (citizens {dropped}). The "
+                        "refined statement above reflects the remaining "
+                        f"{len(valid_critiques) - len(dropped)} participants."
+                    )
 
                 with st.expander("📋 View All Refined Statements (Ranked)"):
                     for i, stmt in enumerate(sorted_statements, 1):

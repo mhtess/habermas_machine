@@ -13,12 +13,53 @@
 # limitations under the License.
 # ==============================================================================
 
+from collections.abc import Sequence
+
+import numpy as np
 from absl.testing import absltest
 from absl.testing import parameterized
 
 from habermas_machine import machine
 from habermas_machine import types
+from habermas_machine.llm_client import base_client
+from habermas_machine.reward_model import base_model as reward_base
 from habermas_machine.social_choice import utils as sc_utils
+
+
+class _FailingRankingModel(reward_base.BaseRankingModel):
+  """Test reward model that fails (returns None) for specified opinions.
+
+  Used to exercise the drop-failed-citizens path in HabermasMachine —
+  any opinion in `failing_opinions` produces a None ranking, simulating
+  the LLM returning a partial/malformed answer that can't be parsed.
+  """
+
+  def __init__(self, failing_opinions: set[str]):
+    self._failing = failing_opinions
+
+  def predict_ranking(
+      self,
+      llm_client: base_client.LLMClient,
+      question: str,
+      opinion: str,
+      statements: Sequence[str],
+      previous_winner: str | None = None,
+      critique: str | None = None,
+      seed: int | None = None,
+      num_retries_on_error: int = 1,
+  ) -> reward_base.RankingResult:
+    del (llm_client, question, previous_winner, critique, seed,
+         num_retries_on_error)
+    if opinion in self._failing:
+      return reward_base.RankingResult(
+          ranking=None,
+          explanation=f'INCORRECT_RANKING_LENGTH (synthetic) for {opinion!r}',
+      )
+    # A trivial deterministic ranking: every candidate ranked equally.
+    return reward_base.RankingResult(
+        ranking=np.zeros(len(statements), dtype=int),
+        explanation=f'ok for {opinion!r}',
+    )
 
 
 class HabermasMachineTest(parameterized.TestCase):
@@ -169,6 +210,70 @@ class HabermasMachineTest(parameterized.TestCase):
   def test_invalid_max_workers(self):
     with self.assertRaises(ValueError):
       self._build_for_parallel(max_workers=0)
+
+  def _build_with_failing_ranker(
+      self, failing_opinions: set[str], num_citizens: int
+  ) -> machine.HabermasMachine:
+    return machine.HabermasMachine(
+        question='Q?',
+        statement_client=types.LLMCLient.MOCK.get_client('mock_url'),
+        reward_client=types.LLMCLient.MOCK.get_client('mock_url'),
+        statement_model=types.StatementModel.MOCK.get_model(),
+        reward_model=_FailingRankingModel(failing_opinions),
+        social_choice_method=types.RankAggregation.SCHULZE.get_method(
+            tie_breaking_method=sc_utils.TieBreakingMethod.TIES_ALLOWED
+        ),
+        num_candidates=4,
+        num_citizens=num_citizens,
+        seed=0,
+    )
+
+  def test_failed_citizens_are_dropped_not_raised(self):
+    """A few citizens failing to rank should not abort the whole round."""
+    opinions = ['op_a', 'op_b', 'op_c', 'op_d', 'op_e']
+    # 1 of 5 fails — well under the >50% drop-loudly threshold.
+    hm = self._build_with_failing_ranker({'op_b'}, num_citizens=5)
+
+    winner, sorted_statements = hm.mediate(opinions)
+
+    self.assertIsNotNone(winner)
+    self.assertNotEmpty(sorted_statements)
+    # The dropped citizen is exposed (1-indexed).
+    self.assertEqual(hm.last_round_dropped_citizens, [2])
+
+  def test_no_drops_means_empty_property(self):
+    """Property stays empty when every citizen produces a valid ranking."""
+    opinions = ['op_a', 'op_b', 'op_c']
+    hm = self._build_with_failing_ranker(set(), num_citizens=3)
+
+    hm.mediate(opinions)
+
+    self.assertEqual(hm.last_round_dropped_citizens, [])
+
+  def test_too_many_drops_raises(self):
+    """If majority of citizens fail, raise so the caller knows it's broken."""
+    opinions = ['op_a', 'op_b', 'op_c', 'op_d', 'op_e']
+    # 3 of 5 fail — over the 50% threshold.
+    hm = self._build_with_failing_ranker(
+        {'op_a', 'op_b', 'op_c'}, num_citizens=5
+    )
+
+    with self.assertRaisesRegex(ValueError, 'Too many citizens'):
+      hm.mediate(opinions)
+
+  def test_dropped_property_resets_per_round(self):
+    """last_round_dropped_citizens should reflect only the most recent round."""
+    opinions = ['op_a', 'op_b', 'op_c', 'op_d', 'op_e']
+    hm = self._build_with_failing_ranker({'op_c'}, num_citizens=5)
+    hm.mediate(opinions)
+    self.assertEqual(hm.last_round_dropped_citizens, [3])
+
+    # Critique round, no failures this time. Reuse the same hm; drops
+    # should clear back to [].
+    hm._reward_model = _FailingRankingModel(set())  # swap in clean model
+    critiques = ['c_a', 'c_b', 'c_c', 'c_d', 'c_e']
+    hm.mediate(critiques)
+    self.assertEqual(hm.last_round_dropped_citizens, [])
 
 
 if __name__ == '__main__':
