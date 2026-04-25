@@ -372,12 +372,26 @@ if SHEETS_AVAILABLE:
                         if not imported_opinions:
                             st.error("No opinions found in the sheet. Check the column letter and row numbers.")
                         else:
-                            # Update session state with imported data
-                            st.session_state.opinions = imported_opinions
+                            # Drop any stale per-widget state from a previous
+                            # session before swapping in the new list.
+                            # Pre-populating st.session_state[f"opinion_{i}"]
+                            # here for unrendered widgets is unreliable —
+                            # only the page-1 widgets actually claim their
+                            # keys on the next rerun, and pages 2+ end up
+                            # blank. The seed loop further down rebuilds
+                            # these keys from the opinions list on the next
+                            # rerun, once each widget actually mounts.
+                            for _stale_key in [
+                                k for k in st.session_state.keys()
+                                if isinstance(k, str) and k.startswith("opinion_")
+                                and k != "opinion_page"
+                            ]:
+                                del st.session_state[_stale_key]
 
-                            # Also set individual widget states (since text areas use keys)
-                            for i, op in enumerate(imported_opinions):
-                                st.session_state[f"opinion_{i}"] = op
+                            # Update session state with imported data — this
+                            # is the canonical source of truth that the seed
+                            # loop reads from.
+                            st.session_state.opinions = imported_opinions
 
                             # Also update the question if found
                             if imported_question and imported_question != 'nan':
@@ -689,12 +703,21 @@ if st.session_state.winner:
                             if not imported_critiques:
                                 st.error("No critiques found in the sheet. Check the column letter.")
                             else:
-                                # Update session state with imported critiques
-                                st.session_state.critiques = imported_critiques
+                                # Same gotcha as the opinion import path —
+                                # pre-populating per-widget state for
+                                # unrendered widgets is unreliable, so drop
+                                # stale critique_* keys and let the seed
+                                # loop rebuild them from the critiques list.
+                                for _stale_key in [
+                                    k for k in st.session_state.keys()
+                                    if isinstance(k, str)
+                                    and k.startswith("critique_")
+                                    and k != "critique_page"
+                                ]:
+                                    del st.session_state[_stale_key]
 
-                                # Also set individual widget states
-                                for i, crit in enumerate(imported_critiques):
-                                    st.session_state[f"critique_{i}"] = crit
+                                # Update session state with imported critiques.
+                                st.session_state.critiques = imported_critiques
 
                                 st.success(f"✅ Imported {len(imported_critiques)} critiques from Google Sheets!")
 
