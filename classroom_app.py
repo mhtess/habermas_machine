@@ -254,9 +254,54 @@ def _render_cost_body(
     col_a.metric("Participants", num_participants_in_run)
     col_b.metric("LLM calls", f"~{estimate.num_llm_calls}")
     col_c.metric(
-        "Tokens (in / out)",
+        "Total tokens (in / out)",
         f"~{estimate.input_tokens // 1000}K / ~{estimate.output_tokens // 1000}K",
+        help=(
+            "Summed across ALL LLM calls in this round (statement "
+            "generation + per-citizen ranking). NOT the size of any single "
+            "prompt — see 'Max single prompt' below for the per-call "
+            "context-window check."
+        ),
     )
+
+    # Per-call context-window check. The "Total tokens (in)" number above
+    # can exceed the model's context window at large N, but that's only a
+    # problem if any *individual* prompt is too big. Statement-generation
+    # prompts contain every opinion and dominate, so we compare them to
+    # the model's context window.
+    col_d, col_e = st.columns(2)
+    col_d.metric(
+        "Max single prompt",
+        f"~{estimate.max_single_prompt_tokens // 1000}K tokens",
+        help=(
+            "Largest prompt in the round (statement-generation calls "
+            "include every opinion). This is what has to fit in the "
+            "model's context window."
+        ),
+    )
+    col_e.metric(
+        "Model context window",
+        f"{estimate.context_window_tokens // 1000}K tokens",
+        help="Per-call input limit for the selected Gemini model.",
+    )
+    utilisation = estimate.context_window_utilisation
+    if not estimate.fits_in_context:
+        st.error(
+            f"⚠️ The largest prompt is ~{estimate.max_single_prompt_tokens:,} "
+            f"tokens, which **exceeds** this model's "
+            f"{estimate.context_window_tokens:,}-token context window. "
+            "The API will truncate the input or reject the call. "
+            "Switch to a longer-context model, reduce the number of "
+            "participants, or shorten the opinions."
+        )
+    elif utilisation > 0.8:
+        st.warning(
+            f"The largest prompt uses ~{utilisation:.0%} of the model's "
+            "context window. You're close to the limit — quality may "
+            "degrade and there's little headroom for longer critiques in "
+            "the next round."
+        )
+
     st.caption(
         "Rough estimate based on prompt size and Gemini list pricing. "
         "Actual cost and runtime depend on model behavior, current pricing, "
@@ -266,6 +311,12 @@ def _render_cost_body(
         st.warning(
             "No pricing data on file for the selected model — falling back "
             "to Gemini Pro list rates, which may overestimate the cost."
+        )
+    if not estimate.context_window_known:
+        st.warning(
+            "No context-window data on file for the selected model — "
+            f"using a conservative {estimate.context_window_tokens:,}-token "
+            "fallback. The actual model may accept more."
         )
     if estimate.is_critique:
         st.info(

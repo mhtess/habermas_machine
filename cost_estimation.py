@@ -60,6 +60,22 @@ _FALLBACK_LATENCY = {'prefill_tps': 20000, 'decode_tps': 80, 'base_s': 2.0}
 _RUNTIME_LOW_FACTOR = 0.6
 _RUNTIME_HIGH_FACTOR = 2.5
 
+
+# Context-window size (max input tokens a single LLM call can accept) per
+# model. The table is approximate and may go stale; check the live docs at
+# https://ai.google.dev/gemini-api/docs/models when in doubt.
+MODEL_CONTEXT_WINDOW_TOKENS = {
+    'gemini-2.5-flash-lite':  1_000_000,
+    'gemini-2.5-flash':       1_000_000,
+    'gemini-flash-latest':    1_000_000,
+    'gemini-3-flash-preview': 1_000_000,
+    'gemini-2.5-pro':         1_000_000,
+    'gemini-pro-latest':      1_000_000,
+    'gemini-3-pro-preview':   1_000_000,
+}
+# Conservative fallback if the selected model isn't in the table.
+_FALLBACK_CONTEXT_WINDOW = 128_000
+
 # Tokenizer approximation: Gemini's tokenizer averages ~4 chars/token for
 # English prose. Off by 10-20% in either direction is fine for a confirmation
 # prompt — we bracket the result with low/high uncertainty bands.
@@ -91,8 +107,10 @@ _HIGH_FACTOR = 1.4
 class CostEstimate:
   """Estimated cost + runtime summary for a single deliberation round."""
   num_llm_calls: int
-  input_tokens: int
-  output_tokens: int
+  input_tokens: int                   # Total summed across ALL calls.
+  output_tokens: int                  # Total summed across ALL calls.
+  max_single_prompt_tokens: int       # Biggest single prompt sent to the LLM.
+  context_window_tokens: int          # Selected model's per-call input limit.
   cost_low_usd: float
   cost_mid_usd: float
   cost_high_usd: float
@@ -101,7 +119,20 @@ class CostEstimate:
   runtime_high_s: float
   pricing_known: bool   # False => model not in pricing table, used fallback
   latency_known: bool   # False => model not in latency table, used fallback
+  context_window_known: bool          # False => fell back to conservative.
   is_critique: bool
+
+  @property
+  def fits_in_context(self) -> bool:
+    """Whether the biggest single prompt fits the selected model's window."""
+    return self.max_single_prompt_tokens <= self.context_window_tokens
+
+  @property
+  def context_window_utilisation(self) -> float:
+    """Fraction of the context window that the biggest single prompt uses."""
+    if self.context_window_tokens <= 0:
+      return 1.0
+    return self.max_single_prompt_tokens / self.context_window_tokens
 
 
 def _count_tokens(text: str | None) -> int:
@@ -212,6 +243,17 @@ def estimate_cost(
   total_input = int(statement_input_total + ranking_input_total)
   total_output = int(statement_output_total + ranking_output_total)
 
+  # The biggest single prompt the LLM will see — we report this separately
+  # from total throughput because the per-call context window, not the
+  # round-total token count, is what triggers context-overflow truncation.
+  # Statement-generation prompts include all opinions, so they dominate.
+  max_single_prompt_tokens = int(max(per_statement_input, per_ranking_input))
+
+  context_window = MODEL_CONTEXT_WINDOW_TOKENS.get(model_name)
+  context_window_known = context_window is not None
+  if context_window is None:
+    context_window = _FALLBACK_CONTEXT_WINDOW
+
   pricing = MODEL_PRICING_USD_PER_M.get(model_name)
   pricing_known = pricing is not None
   if pricing is None:
@@ -249,6 +291,8 @@ def estimate_cost(
       num_llm_calls=num_candidates + n,
       input_tokens=total_input,
       output_tokens=total_output,
+      max_single_prompt_tokens=max_single_prompt_tokens,
+      context_window_tokens=context_window,
       cost_low_usd=mid_cost * _LOW_FACTOR,
       cost_mid_usd=mid_cost,
       cost_high_usd=mid_cost * _HIGH_FACTOR,
@@ -257,5 +301,6 @@ def estimate_cost(
       runtime_high_s=mid_runtime_s * _RUNTIME_HIGH_FACTOR,
       pricing_known=pricing_known,
       latency_known=latency_known,
+      context_window_known=context_window_known,
       is_critique=is_critique,
   )
