@@ -16,8 +16,30 @@
 from absl.testing import absltest
 from absl.testing import parameterized
 
+from habermas_machine.llm_client import base_client
 from habermas_machine.llm_client import mock_client
 from habermas_machine.statement_model import cot_model
+
+
+class _PromptCapturingClient(base_client.LLMClient):
+  """LLM client that records every prompt it sees and returns a fixed reply.
+
+  Used to verify that target_word_count plumbed through generate_statement
+  ends up in the actual prompt sent to the model.
+  """
+
+  def __init__(self, response: str):
+    self._response = response
+    self.last_prompt: str | None = None
+
+  def sample_text(self, prompt, *, max_tokens=base_client.DEFAULT_MAX_TOKENS,
+                  terminators=base_client.DEFAULT_TERMINATORS,
+                  temperature=base_client.DEFAULT_TEMPERATURE,
+                  timeout=base_client.DEFAULT_TIMEOUT_SECONDS,
+                  seed=None):
+    del max_tokens, terminators, temperature, timeout, seed
+    self.last_prompt = prompt
+    return self._response
 
 
 class COTModelTest(parameterized.TestCase):
@@ -116,6 +138,85 @@ class COTModelTest(parameterized.TestCase):
     )
     self.assertEqual(statement, "Mock statement")
     self.assertEqual(explanation, "Mock explanation")
+
+  def test_length_instruction_returns_empty_when_target_is_none(self):
+    self.assertEqual(cot_model._length_instruction(None), "")
+
+  def test_length_instruction_contains_target_and_range(self):
+    instruction = cot_model._length_instruction(850)
+    # Target word count appears verbatim.
+    self.assertIn("850 words", instruction)
+    # The ±20% range is rendered (low=680, high=1020).
+    self.assertIn("680", instruction)
+    self.assertIn("1020", instruction)
+    # The directive uses an explicit marker so the model can find it
+    # under the earlier "typically one paragraph" guidance.
+    self.assertIn("LENGTH TARGET", instruction)
+    # The "prefer shorter than padded" caveat is present so we don't
+    # encourage the model to pad.
+    self.assertIn("padding", instruction)
+
+  @parameterized.named_parameters(
+      ("opinion_only", None, None),
+      ("with_critique", "Previous winner.", ["Critique 1.", "Critique 2."]),
+  )
+  def test_generate_prompt_appends_length_instruction(
+      self, previous_winner, critiques
+  ):
+    """The length instruction shows up at the END of the generated prompt."""
+    question = "Q?"
+    opinions = ["op A", "op B"]
+
+    prompt_without = cot_model._generate_prompt(
+        question, opinions, previous_winner, critiques
+    )
+    prompt_with = cot_model._generate_prompt(
+        question, opinions, previous_winner, critiques,
+        target_word_count=400,
+    )
+
+    # No target -> no length instruction text.
+    self.assertNotIn("LENGTH TARGET", prompt_without)
+
+    # Target -> instruction appended at the end (so the model treats it
+    # as authoritative over the upstream "typically one paragraph"
+    # guidance baked into the few-shot examples).
+    self.assertIn("LENGTH TARGET", prompt_with)
+    self.assertIn("400 words", prompt_with)
+    self.assertTrue(
+        prompt_with.startswith(prompt_without),
+        msg="Length instruction should be appended, not interleaved.",
+    )
+
+  def test_generate_statement_threads_target_word_count_into_prompt(self):
+    """COTModel.generate_statement must forward target_word_count."""
+    model = cot_model.COTModel()
+    spy = _PromptCapturingClient(
+        response="<answer>e<sep>s</answer>"
+    )
+
+    model.generate_statement(
+        spy,
+        question="Q?",
+        opinions=["op"],
+        target_word_count=350,
+    )
+
+    self.assertIsNotNone(spy.last_prompt)
+    self.assertIn("LENGTH TARGET", spy.last_prompt)
+    self.assertIn("350 words", spy.last_prompt)
+
+  def test_generate_statement_default_omits_length_instruction(self):
+    """Sanity check: the instruction is only added when explicitly requested."""
+    model = cot_model.COTModel()
+    spy = _PromptCapturingClient(
+        response="<answer>e<sep>s</answer>"
+    )
+
+    model.generate_statement(spy, question="Q?", opinions=["op"])
+
+    self.assertIsNotNone(spy.last_prompt)
+    self.assertNotIn("LENGTH TARGET", spy.last_prompt)
 
 
 if __name__ == "__main__":
