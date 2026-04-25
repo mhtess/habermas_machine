@@ -86,13 +86,21 @@ with st.sidebar:
         ),
     )
 
-    # Number of candidates
+    # Number of candidates. Capped at 26 because the per-citizen ranker
+    # uses single-letter labels (A-Z) in both the prompt and its arrow-notation
+    # regex (see reward_model/cot_ranking_model.py). Going past Z would
+    # require switching to multi-char or numeric labels and rewriting the
+    # few-shot examples.
     num_candidates = st.slider(
         "Number of Candidate Statements",
         min_value=2,
-        max_value=8,
+        max_value=26,
         value=4,
-        help="How many alternative consensus statements to generate"
+        help=(
+            "How many alternative consensus statements to generate. "
+            "More candidates = more diversity, but also longer ranking "
+            "prompts and noisier per-citizen rankings past ~10 items."
+        ),
     )
 
     # Number of retries
