@@ -70,11 +70,10 @@ MODEL_PRICING_USD_PER_M = {
         'long_input': 2.50, 'long_output': 15.00,
         'long_threshold': 200_000,
     },
-    # Pro 3 Preview: two-tier, more expensive than 2.5 Pro.
-    # NOTE: Google deprecated this model on 2026-03-09 in favour of
-    # Gemini 3.1 Pro. Selecting it from the dropdown will fail at the
-    # API; the entry stays for historical estimates only.
-    'gemini-3-pro-preview': {
+    # Pro 3.1 Preview: two-tier, same rates as the (now-deprecated) Gemini
+    # 3 Pro Preview it replaces. Google's most capable Pro tier as of
+    # April 2026; in preview, pricing subject to change.
+    'gemini-3.1-pro-preview': {
         'input': 2.00, 'output': 12.00,
         'long_input': 4.00, 'long_output': 18.00,
         'long_threshold': 200_000,
@@ -102,9 +101,9 @@ MODEL_LATENCY = {
     'gemini-2.5-flash':       {'prefill_tps': 50000, 'decode_tps': 150, 'base_s': 1.5},
     'gemini-flash-latest':    {'prefill_tps': 50000, 'decode_tps': 150, 'base_s': 1.5},
     'gemini-3-flash-preview': {'prefill_tps': 50000, 'decode_tps': 150, 'base_s': 1.5},
-    'gemini-2.5-pro':         {'prefill_tps': 20000, 'decode_tps': 80,  'base_s': 2.0},
-    'gemini-pro-latest':      {'prefill_tps': 20000, 'decode_tps': 80,  'base_s': 2.0},
-    'gemini-3-pro-preview':   {'prefill_tps': 20000, 'decode_tps': 80,  'base_s': 2.0},
+    'gemini-2.5-pro':           {'prefill_tps': 20000, 'decode_tps': 80,  'base_s': 2.0},
+    'gemini-pro-latest':        {'prefill_tps': 20000, 'decode_tps': 80,  'base_s': 2.0},
+    'gemini-3.1-pro-preview':   {'prefill_tps': 20000, 'decode_tps': 80,  'base_s': 2.0},
 }
 _FALLBACK_LATENCY = {'prefill_tps': 20000, 'decode_tps': 80, 'base_s': 2.0}
 
@@ -122,9 +121,9 @@ MODEL_CONTEXT_WINDOW_TOKENS = {
     'gemini-2.5-flash':       1_000_000,
     'gemini-flash-latest':    1_000_000,
     'gemini-3-flash-preview': 1_000_000,
-    'gemini-2.5-pro':         1_000_000,
-    'gemini-pro-latest':      1_000_000,
-    'gemini-3-pro-preview':   1_000_000,
+    'gemini-2.5-pro':           1_000_000,
+    'gemini-pro-latest':        1_000_000,
+    'gemini-3.1-pro-preview':   1_000_000,
 }
 # Conservative fallback if the selected model isn't in the table.
 _FALLBACK_CONTEXT_WINDOW = 128_000
